@@ -1,0 +1,18 @@
+[package]
+name = "tenebrae-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Command-line adapters around the pure tenebrae crate (file I/O lives here, never in the libraries)."
+publish = false
+
+[dependencies]
+tenebrae.workspace = true
+tenebrae-bench.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

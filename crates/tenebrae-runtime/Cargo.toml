@@ -1,0 +1,15 @@
+[package]
+name = "tenebrae-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Native visibility queries over Umbra 3.3.6 tomes: frustum and portal culling from the typed tome model. Written from the format (M6)."
+publish = false
+
+# Pure library: no filesystem, network, process or GPU dependency.
+[dependencies]
+tenebrae-tome.workspace = true
+
+[lints]
+workspace = true

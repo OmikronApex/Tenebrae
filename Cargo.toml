@@ -1,0 +1,47 @@
+[workspace]
+resolver = "3"
+members = [
+    # Pure libraries: no filesystem, network, process or GPU access, no dependencies, no `unsafe`.
+    "crates/tenebrae-tome",    # the tome format: model, reader, writer, point lookups
+    "crates/tenebrae-geom",    # triangle soup, BVH, exact segment occlusion
+    "crates/tenebrae-bake",    # the baker
+    "crates/tenebrae-runtime", # frustum and portal queries over a decoded tome
+    "crates/tenebrae",         # the facade: tome + geom + bake + runtime
+    # Adapters (I/O).
+    "crates/tenebrae-tools",   # CLI binaries
+    "crates/tenebrae-bench",   # generated scenes, truth, baseline gates
+]
+# `cargo test --release` at the root runs the libraries and tools; the benchmark (a few
+# minutes) stays an explicit `-p tenebrae-bench`.
+default-members = [
+    "crates/tenebrae-tome",
+    "crates/tenebrae-geom",
+    "crates/tenebrae-bake",
+    "crates/tenebrae-runtime",
+    "crates/tenebrae",
+    "crates/tenebrae-tools",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+tenebrae-tome = { path = "crates/tenebrae-tome" }
+tenebrae-geom = { path = "crates/tenebrae-geom" }
+tenebrae-bake = { path = "crates/tenebrae-bake" }
+tenebrae-runtime = { path = "crates/tenebrae-runtime" }
+tenebrae = { path = "crates/tenebrae" }
+tenebrae-bench = { path = "crates/tenebrae-bench" }
+
+# Shared by the pure libraries (`lints.workspace = true`).
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+unreachable_pub = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }

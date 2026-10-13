@@ -1,0 +1,17 @@
+[package]
+name = "tenebrae-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Domain-agnostic benchmark: generated scenes, Tenebrae bake gates, Umbra reference numbers."
+publish = false
+
+[dependencies]
+tenebrae.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

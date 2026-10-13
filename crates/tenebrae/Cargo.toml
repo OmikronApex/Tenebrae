@@ -1,0 +1,18 @@
+[package]
+name = "tenebrae"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Umbra 3.3.6 visibility tomes (format version 18): format, baker and runtime queries. The facade over the tenebrae-* crates."
+publish = false
+
+# Pure: every dependency is a pure workspace crate.
+[dependencies]
+tenebrae-tome.workspace = true
+tenebrae-geom.workspace = true
+tenebrae-bake.workspace = true
+tenebrae-runtime.workspace = true
+
+[lints]
+workspace = true

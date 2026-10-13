@@ -1,0 +1,8 @@
+/target
+# Tomes and other game-derived data never enter this repository.
+*.tome
+*.bin
+# BMAD Method install (per developer; see CONTRIBUTING.md). Install locally, never commit.
+.agents/
+.claude/
+_bmad/

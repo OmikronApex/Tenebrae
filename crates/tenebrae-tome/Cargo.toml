@@ -1,0 +1,14 @@
+[package]
+name = "tenebrae-tome"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Umbra 3.3.6 visibility tome (format version 18): lossless typed model, reader, writer and point lookups."
+publish = false
+
+# Pure library: no filesystem, network, process or GPU dependency.
+[dependencies]
+
+[lints]
+workspace = true

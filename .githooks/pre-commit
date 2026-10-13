@@ -1,0 +1,6 @@
+#!/bin/sh
+# Tenebrae commit gate: rustfmt and clippy over the whole workspace (every crate).
+# Enable once per clone: git config core.hooksPath .githooks
+set -e
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings

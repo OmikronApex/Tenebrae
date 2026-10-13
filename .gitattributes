@@ -1,0 +1,2 @@
+# Benchmark assets are binary: never convert line endings or diff them as text.
+*.tbsc binary
