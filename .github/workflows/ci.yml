@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  # The release workflow reruns these gates on the tagged commit (AD-14).
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.ref }}

@@ -181,7 +181,7 @@ Arrows are the only permitted dependency directions. `tenebrae-tome` and `tenebr
   - The five library crates publish. `tenebrae-tools` and `tenebrae-bench` have `publish = false` forever.
   - Each `[workspace.dependencies]` entry carries `path` and `version = "=X.Y.Z"` (the workspace version).
   - A tag `vX.Y.Z` on `main` publishes all five from GitHub Actions, in dependency order (`tenebrae-tome`, `tenebrae-geom`, then `tenebrae-bake`, `tenebrae-runtime`, then `tenebrae`), through crates.io trusted publishing (`rust-lang/crates-io-auth-action`, job permission `id-token: write`). The first publish of each crate is manual.
-  - The release workflow reruns AD-15's full gate set on the tagged commit and publishes only if it passes.
+  - The release workflow reruns AD-15's full gate set on the tagged commit and publishes only if it passes. [amended 2026-10-13: until the AD-15 CI upgrade in deferred-work.md lands, the release reruns the gates .github/workflows/ci.yml has today]
   - Before tagging, a maintainer runs the stock-tome round trip and, for any change AD-4 sends there since the last release, the external harness, and records the outcome in the tag's release notes.
   - Library crates never depend, including as dev-dependencies, on `tenebrae-tools` or `tenebrae-bench`; a release cannot stop after a partial publish for that reason.
   - Every published crate carries `license`, `description`, `repository`, `readme`, `keywords` and `categories`.
