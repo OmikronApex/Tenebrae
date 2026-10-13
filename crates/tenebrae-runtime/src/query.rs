@@ -69,9 +69,6 @@ pub struct Counters {
     pub candidates: u32,
     /// Objects output.
     pub output: u32,
-    /// Nanoseconds spent in the query's stages: level-of-detail selection, start cells,
-    /// coverage propagation, output.
-    pub stage_ns: [u32; 4],
     /// Pixel rows handed to the rasteriser, summed over rasterisations.
     pub raster_rows: u32,
     /// Portals rejected, by reason: boundary or closed gate, no target or self, off screen,

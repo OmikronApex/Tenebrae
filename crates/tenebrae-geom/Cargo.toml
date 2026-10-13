@@ -4,8 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Geometry core for Tenebrae: triangle soup with owners, a BVH, exact segment occlusion and triangle/box tests."
-publish = false
 
 # Pure library: no filesystem, network, process or GPU dependency.
 [dependencies]

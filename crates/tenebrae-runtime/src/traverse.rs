@@ -137,11 +137,6 @@ impl Traversal {
         if camera.degenerate {
             return Err(Status::BadCamera);
         }
-        let clock = std::time::Instant::now();
-        let lap = |slot: usize, counters: &mut Counters| {
-            counters.stage_ns[slot] =
-                clock.elapsed().as_nanos() as u32 - counters.stage_ns[..slot].iter().sum::<u32>();
-        };
         self.reset(rt);
         self.cam_pos = camera.position;
         let scale = if opts.accuracy > 0.0 {
@@ -152,11 +147,9 @@ impl Traversal {
         // Nodes and objects are tested against the frustum of any eye within the radius.
         let wide = camera.grown(opts.radius);
         self.select(rt, &wide, opts.radius, scale);
-        lap(0, counters);
         if !self.start(rt, camera, opts.radius) {
             return Err(Status::NoCell);
         }
-        lap(1, counters);
         let mut visits = 0u32;
         let mut budget = 0u32;
         let mut entered = vec![false; self.order.len()];
@@ -203,9 +196,7 @@ impl Traversal {
             self.feedback = feedback;
             self.feedback.clear();
         }
-        lap(2, counters);
         self.output(rt, camera, &wide, opts.radius, out, counters);
-        lap(3, counters);
         Ok(())
     }
 

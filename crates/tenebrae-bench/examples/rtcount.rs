@@ -24,7 +24,6 @@ fn main() {
     println!("decode {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
     let mut q = Query::new(&rt);
     let mut sums = [0f64; 7];
-    let mut stage = [0f64; 4];
     let mut rej = [0f64; 6];
     let mut times = Vec::with_capacity(n);
     let mut reached = 0f64;
@@ -65,9 +64,6 @@ fn main() {
         ]) {
             *s += f64::from(v);
         }
-        for (s, v) in stage.iter_mut().zip(c.stage_ns) {
-            *s += f64::from(v);
-        }
         for (s, v) in rej.iter_mut().zip(c.rejected) {
             *s += f64::from(v);
         }
@@ -81,13 +77,6 @@ fn main() {
         rej[3] / n as f64,
         rej[4] / n as f64,
         rej[5] / n as f64
-    );
-    println!(
-        "mean stage us (last run of each camera): select {:.1}, start {:.1}, propagate {:.1}, output {:.1}",
-        stage[0] / n as f64 / 1e3,
-        stage[1] / n as f64 / 1e3,
-        stage[2] / n as f64 / 1e3,
-        stage[3] / n as f64 / 1e3
     );
     times.sort_by(f64::total_cmp);
     let k = n as f64;

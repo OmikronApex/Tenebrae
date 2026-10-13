@@ -1,0 +1,120 @@
+name: Release
+
+# AD-14: an annotated tag `vX.Y.Z` on a commit of `main` reruns the CI gates on that commit and,
+# after the owner approves the `release` environment, publishes the five library crates to
+# crates.io in dependency order through trusted publishing, then creates the GitHub Release from
+# the tag's message. Any other tag name does not start this workflow.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Refuses the tag before anything runs: it must be annotated, its commit must be on `main`, and
+  # its version must equal the workspace version. Every failed check is reported, then the job fails.
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      notes: ${{ steps.check.outputs.notes }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - run: rustup toolchain install
+      - id: check
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Fetch the tag object itself (checkout may leave a lightweight ref) and the tip of main.
+          git fetch --force --no-tags origin \
+            "+refs/tags/${TAG}:refs/tags/${TAG}" \
+            "+refs/heads/main:refs/remotes/origin/main"
+          failed=0
+
+          if [ "$(git cat-file -t "refs/tags/${TAG}")" != "tag" ]; then
+            echo "::error::${TAG} is a lightweight tag. Release tags must be annotated (git tag -a ${TAG} -m '<release notes>'); the message becomes the GitHub Release notes."
+            failed=1
+          fi
+
+          commit="$(git rev-parse "refs/tags/${TAG}^{commit}")"
+          if ! git merge-base --is-ancestor "${commit}" refs/remotes/origin/main; then
+            echo "::error::${TAG} points at ${commit}, which is not on main. Release tags go on a commit of main."
+            failed=1
+          fi
+
+          if [ "${commit}" != "${GITHUB_SHA}" ]; then
+            echo "::error::${TAG} now points at ${commit}, but this run was started for ${GITHUB_SHA}; the tag moved after the push. Push the tag again."
+            failed=1
+          fi
+
+          tag_version="${TAG#v}"
+          versions="$(cargo metadata --no-deps --format-version 1 | jq -r '[.packages[].version] | unique | join(" ")')"
+          if [ "${versions}" != "${tag_version}" ]; then
+            echo "::error::Tag version ${tag_version} differs from the workspace version ${versions} ([workspace.package] version in Cargo.toml)."
+            failed=1
+          fi
+
+          if [ "${failed}" -ne 0 ]; then
+            exit 1
+          fi
+
+          delimiter="NOTES_$(openssl rand -hex 16)"
+          {
+            echo "notes<<${delimiter}"
+            git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/${TAG}"
+            echo "${delimiter}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "${TAG}: annotated, ${commit} is on main, workspace version ${versions}."
+      # Packages and builds the five crates on Linux before the gates and the approval, so a
+      # packaging failure stops the release here rather than inside the approved publish job.
+      - run: cargo publish --workspace --dry-run
+
+  # AD-15's gate set as `ci.yml` has it today, on the tagged commit.
+  gates:
+    needs: verify
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: [verify, gates]
+    runs-on: ubuntu-latest
+    # Required reviewer: the owner approves every release on the run page. The crates.io trusted
+    # publishers are bound to this environment.
+    environment: release
+    permissions:
+      contents: write # the GitHub Release
+      id-token: write # crates.io trusted publishing
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - id: auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+      # Publishes the publishable members (the five libraries) in dependency order;
+      # tenebrae-tools and tenebrae-bench have `publish = false`.
+      - run: cargo publish --workspace
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      - name: Create the GitHub Release from the tag message
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          NOTES: ${{ needs.verify.outputs.notes }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${NOTES}" > "${RUNNER_TEMP}/notes.md"
+          gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --verify-tag \
+            --title "${TAG}" --notes-file "${RUNNER_TEMP}/notes.md"
