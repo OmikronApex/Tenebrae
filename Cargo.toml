@@ -23,7 +23,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.95"
 license = "GPL-3.0-or-later"
@@ -35,11 +35,11 @@ categories = ["game-development", "rendering", "parser-implementations"]
 [workspace.dependencies]
 # The libraries carry an exact pin to the workspace version, so a consumer never resolves two
 # copies of one crate (AD-14). Bump these with `[workspace.package] version`.
-tenebrae-tome = { path = "crates/tenebrae-tome", version = "=0.1.0" }
-tenebrae-geom = { path = "crates/tenebrae-geom", version = "=0.1.0" }
-tenebrae-bake = { path = "crates/tenebrae-bake", version = "=0.1.0" }
-tenebrae-runtime = { path = "crates/tenebrae-runtime", version = "=0.1.0" }
-tenebrae = { path = "crates/tenebrae", version = "=0.1.0" }
+tenebrae-tome = { path = "crates/tenebrae-tome", version = "=0.1.1" }
+tenebrae-geom = { path = "crates/tenebrae-geom", version = "=0.1.1" }
+tenebrae-bake = { path = "crates/tenebrae-bake", version = "=0.1.1" }
+tenebrae-runtime = { path = "crates/tenebrae-runtime", version = "=0.1.1" }
+tenebrae = { path = "crates/tenebrae", version = "=0.1.1" }
 tenebrae-bench = { path = "crates/tenebrae-bench" }
 
 # Shared by the pure libraries (`lints.workspace = true`).

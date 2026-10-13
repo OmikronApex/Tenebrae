@@ -89,26 +89,46 @@ fn depths(codes: &[u8]) -> Vec<u32> {
     depth
 }
 
-/// Per-node path keys: the root is `1 << (w - 1)`; a child is its parent shifted right, with the
-/// top bit set on the child below the split.
+/// Per-node path keys (`+0x98`), packed LSB-first at width `w` = max depth + 1, and `w`. The
+/// root is `1 << (w - 1)`; a child is its parent shifted right, with the top bit set on the
+/// child below the split. So at depth `d` the marker sits at bit `w - 1 - d`, and bit
+/// `w - 1 - d + j` (`j` = 1..=d) is step `j` from the root (1 = below the split). Built bit by
+/// bit, so `w` may exceed 32 (stock tomes reach 34).
 fn node_keys(codes: &[u8]) -> (u32, Vec<u32>) {
+    let n = codes.len();
     let width = depths(codes).into_iter().max().map_or(1, |d| d + 1);
-    let top = 1u32 << (width - 1);
-    let mut keys = vec![0u32; codes.len()];
-    if !keys.is_empty() {
-        keys[0] = top;
+    let w = width as usize;
+    let mut words = vec![0u32; bits::packed_words(n, width)];
+    let get = |words: &[u32], node: usize, b: usize| {
+        let at = node * w + b;
+        words[at >> 5] >> (at & 31) & 1 != 0
+    };
+    let set = |words: &mut [u32], node: usize, b: usize| {
+        let at = node * w + b;
+        words[at >> 5] |= 1 << (at & 31);
+    };
+    if n > 0 {
+        set(&mut words, 0, w - 1);
     }
     let mut inner = 0usize;
-    for v in 0..codes.len() {
-        if codes[v] != LEAF {
+    for (v, &code) in codes.iter().enumerate() {
+        if code != LEAF {
             inner += 1;
-            if 2 * inner < codes.len() {
-                keys[2 * inner - 1] = (keys[v] >> 1) | top;
-                keys[2 * inner] = keys[v] >> 1;
+            if 2 * inner < n {
+                for (child, below) in [(2 * inner - 1, true), (2 * inner, false)] {
+                    for b in 1..w {
+                        if get(&words, v, b) {
+                            set(&mut words, child, b - 1);
+                        }
+                    }
+                    if below {
+                        set(&mut words, child, w - 1);
+                    }
+                }
             }
         }
     }
-    (width, keys)
+    (width, words)
 }
 
 fn tile(out: &mut Out, t: &Tile) {
@@ -218,7 +238,7 @@ pub fn write(t: &Tome) -> Vec<u8> {
     }
     let (key_bits, keys) = node_keys(&t.top.codes);
     let keys_at = out.section(true);
-    out.words(&bits::pack(keys, key_bits, bits::packed_words(n, key_bits)));
+    out.words(&keys);
     let distances = out.section(true);
     for d in &t.node_distances {
         out.f32(*d);
@@ -335,4 +355,137 @@ pub fn write(t: &Tome) -> Vec<u8> {
     head.0.extend_from_slice(&h.params);
     out.0[..HEADER_SIZE].copy_from_slice(&head.0);
     out.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures::{chain_top, tome};
+
+    /// The keys as `u32` values, as the writer built them before keys could exceed 32 bits.
+    fn u32_keys(codes: &[u8]) -> (u32, Vec<u32>) {
+        let width = depths(codes).into_iter().max().map_or(1, |d| d + 1);
+        let top = 1u32 << (width - 1);
+        let mut keys = vec![0u32; codes.len()];
+        if !keys.is_empty() {
+            keys[0] = top;
+        }
+        let mut inner = 0usize;
+        for v in 0..codes.len() {
+            if codes[v] != LEAF {
+                inner += 1;
+                if 2 * inner < codes.len() {
+                    keys[2 * inner - 1] = (keys[v] >> 1) | top;
+                    keys[2 * inner] = keys[v] >> 1;
+                }
+            }
+        }
+        (width, keys)
+    }
+
+    /// A tree of `depth` levels with leaves cut in by `mask`, for varied shapes, and at most
+    /// `cap` inner nodes per level.
+    fn ragged(depth: usize, mask: u32, cap: usize) -> Vec<u8> {
+        let mut codes = vec![0u8];
+        let mut frontier = 1usize;
+        let mut k = 0u32;
+        for level in 1..=depth {
+            let mut next = 0;
+            for _ in 0..2 * frontier {
+                k = k.wrapping_mul(1_103_515_245).wrapping_add(12_345 ^ mask);
+                let inner = level < depth && (next == 0 || ((k >> 16) & 3 != 0 && next < cap));
+                codes.push(if inner { (k >> 20) as u8 % 3 } else { LEAF });
+                next += usize::from(inner);
+            }
+            frontier = next;
+        }
+        codes
+    }
+
+    #[test]
+    fn keys_match_the_u32_path_below_32_levels() {
+        let mut trees: Vec<Vec<u8>> = (0..32).map(|d| chain_top(d).codes).collect();
+        trees.extend((1..12).map(|d| ragged(d, d as u32, usize::MAX)));
+        trees.push(Vec::new());
+        for codes in &trees {
+            let (w, old) = u32_keys(codes);
+            let (width, words) = node_keys(codes);
+            assert_eq!(width, w);
+            assert_eq!(
+                words,
+                bits::pack(old, w, bits::packed_words(codes.len(), w)),
+                "{codes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deep_keys_hold_the_path() {
+        for depth in [33usize, 70] {
+            let codes = chain_top(depth).codes;
+            let (width, words) = node_keys(&codes);
+            assert_eq!(width as usize, depth + 1);
+            let w = width as usize;
+            let bit = |node: usize, b: usize| {
+                let at = node * w + b;
+                words[at >> 5] >> (at & 31) & 1
+            };
+            // The deepest above-split leaf: path below^(depth-1), then above.
+            let node = codes.len() - 1;
+            let d = depth;
+            assert_eq!(bit(node, w - 1 - d), 1, "marker");
+            for j in 1..=d {
+                assert_eq!(bit(node, w - 1 - d + j), u32::from(j < d), "step {j}");
+            }
+            for b in 0..w - 1 - d {
+                assert_eq!(bit(node, b), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn every_deep_key_matches_a_u128_recurrence() {
+        let trees = [chain_top(33).codes, chain_top(70).codes, ragged(45, 7, 4)];
+        for codes in &trees {
+            let n = codes.len();
+            let w = depths(codes).into_iter().max().map_or(1, |d| d + 1);
+            assert!(w > 33, "depth {}", w - 1);
+            let top = 1u128 << (w - 1);
+            let mut keys = vec![0u128; n];
+            keys[0] = top;
+            let mut inner = 0usize;
+            for (v, &code) in codes.iter().enumerate() {
+                if code != LEAF {
+                    inner += 1;
+                    if 2 * inner < n {
+                        keys[2 * inner - 1] = (keys[v] >> 1) | top;
+                        keys[2 * inner] = keys[v] >> 1;
+                    }
+                }
+            }
+            let (width, words) = node_keys(codes);
+            assert_eq!(width, w);
+            assert_eq!(words.len(), bits::packed_words(n, w));
+            for (node, key) in keys.iter().enumerate() {
+                for b in 0..w as usize {
+                    let at = node * w as usize + b;
+                    let got = words[at >> 5] >> (at & 31) & 1;
+                    assert_eq!(u128::from(got), key >> b & 1, "node {node} bit {b}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deep_top_trees_write_and_read_back() {
+        for depth in [33usize, 70] {
+            let top = chain_top(depth);
+            let n = top.codes.len();
+            let t = tome(top, vec![None; n], 0);
+            let bytes = write(&t);
+            let width = u32::from_le_bytes(bytes[0x94..0x98].try_into().unwrap());
+            assert_eq!(width as usize, depth + 1);
+            assert_eq!(crate::read(&bytes), Ok(t));
+        }
+    }
 }

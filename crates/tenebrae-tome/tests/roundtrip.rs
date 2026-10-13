@@ -68,7 +68,9 @@ fn every_tome_round_trips_byte_for_byte() {
 /// domain that links valid cells. Prints each tome's settings string and counts.
 #[test]
 fn stock_tomes_answer_queries() {
-    use tenebrae_tome::locate::{Locator, find_cell, global_cell_boxes, global_portals};
+    use tenebrae_tome::locate::{
+        Locator, cell_regions, find_cell, global_cell_boxes, global_portals,
+    };
     let paths = tomes();
     if paths.is_empty() {
         eprintln!("TENEBRAE_TOMES unset or no tomes found: nothing to check");
@@ -102,7 +104,31 @@ fn stock_tomes_answer_queries() {
             assert_eq!(loc.find_cell(q), want, "{} at {q:?}", path.display());
             found += usize::from(want.is_some());
         }
-        assert!(found > 0, "{}: no lattice point in a cell", path.display());
+        // A domain of thin open slabs can miss the lattice; the centre of every leaf box that
+        // resolves to a cell finds that cell.
+        let mut centres = 0usize;
+        for (g, list) in cell_regions(&tome).iter().enumerate() {
+            for b in list {
+                let c = [0, 1, 2].map(|a| (b.min[a] + b.max[a]) * 0.5);
+                if (0..3).any(|a| c[a] <= b.min[a] || c[a] >= b.max[a]) {
+                    continue;
+                }
+                // `Locator` only: `find_cell` re-ranks the trees per call, and the lattice above
+                // already ties the two together.
+                assert_eq!(
+                    loc.find_cell(c),
+                    Some(g as u32),
+                    "{} at {c:?}",
+                    path.display()
+                );
+                centres += 1;
+            }
+        }
+        assert!(
+            found + centres > 0,
+            "{}: no lattice point or region centre in a cell",
+            path.display()
+        );
         let boxes = global_cell_boxes(&tome);
         assert_eq!(boxes.len(), tome.global_cells.len());
         let step = |a: usize| (d.max[a] - d.min[a]) / 65535.0 * 1.01;

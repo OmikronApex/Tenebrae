@@ -7,6 +7,8 @@
 //! [`write`] documents).
 
 mod bits;
+#[cfg(test)]
+mod fixtures;
 pub mod locate;
 mod read;
 mod write;
@@ -134,15 +136,24 @@ pub struct ViewTree {
     pub tree: KdTree,
     /// Bits per leaf value.
     pub leaf_bits: u32,
-    /// One value per leaf, in leaf order: a local cell, all-ones for solid space, or (top bit
-    /// set) the root of a plane BSP.
+    /// One value per leaf, in leaf order. With `all_ones = (1 << leaf_bits) - 1` and the top
+    /// bit `1 << (leaf_bits - 1)`: a value below the top bit is a local cell, `all_ones` is
+    /// solid space, and any other value names node `value & (all_ones >> 1)` of the tile's
+    /// [`Bsp`], which refines the leaf (walk described there).
     pub leaf_values: Vec<u32>,
 }
 
 /// Plane BSP refining view-tree leaves.
+///
+/// A point lookup starts at the node a leaf value names ([`ViewTree::leaf_values`]). For node
+/// `n`, with `lo = n as u32`: the plane is `planes[lo & 0x3FFF_FFFF]`, and
+/// `d = p.x * x + p.y * y + p.z * z + w` in `f32`. When `d >= 0` the next step is
+/// `(n >> 48) & 0xFFFF`, a local cell if `lo` bit 31 is set; otherwise it is
+/// `(n >> 32) & 0xFFFF`, a local cell if bit 30 is set. Without that bit the step is the next
+/// node. A local cell `0xFFFF` is no cell. The baker never emits a BSP.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Bsp {
-    /// Nodes (u64 each).
+    /// Nodes (u64 each), encoded as above.
     pub nodes: Vec<u64>,
     /// Planes (xyz normal, w distance).
     pub planes: Vec<[f32; 4]>,

@@ -301,6 +301,9 @@ keeps more), bounded by the gate below, and never a false cull the oracle avoids
   keeps at a pixel boundary or through a coarse LOD cell, not a visible one. Sampling pixel
   centres (half-conservative) brought `terrain` to +4 % but culled truly visible objects on
   `city` and `rooms`, so conservative stays.
+- 2026-10-13 (`spec-fix-bsp-lookup-deep-keys.md`): `locate` now follows plane-BSP leaves, so
+  the camera-cell lookup, which still resolves a BSP leaf as `locate` does (Never list),
+  reaches the BSP's local cell instead of no cell. The baker still emits no BSP.
 
 ## Review Triage Log
 

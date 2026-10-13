@@ -90,8 +90,9 @@
   evidence: Waits for the consumer's confirmation of what it links; `tenebrae-bench` and `tenebrae-tools` keep the oracle as the reference either way.
   resolved: 2026-10-13 (publication). `tenebrae-oracle` deleted; `tenebrae::query` re-exports `tenebrae-runtime`; the bench scores visibility with the runtime and its oracle comparison tests are gone. Validation against the engine's runtime now needs the external harness.
 - source_spec: `docs/implementation-artifacts/spec-m6-native-runtime.md`
-  summary: Gate portals, plane-BSP leaves, dynamic occluders and a configurable coverage resolution are not exercised or not implemented.
-  evidence: No tome in the workspace has gates or BSP leaves (the parity scene's tome A has none); a gate portal is opened over the whole cell face on its plane when its gates are open; BSP leaves resolve as `locate` resolves them. Dynamic occluders and the 64×64 resolution are design choices of V1.
+  summary: Gate portals, dynamic occluders and a configurable coverage resolution are not exercised or not implemented (plane-BSP leaves: lookups follow them since 2026-10-13, see the amendment).
+  evidence: No tome in the workspace has gates or BSP leaves (the parity scene's tome A has none); a gate portal is opened over the whole cell face on its plane when its gates are open. Dynamic occluders and the 64×64 resolution are design choices of V1.
+  amended: 2026-10-13 (`spec-fix-bsp-lookup-deep-keys.md`). Point lookups (`locate::find_cell`, `Locator`, the runtime's camera cell) now follow plane-BSP leaves to their local cell; 26,991 of 366,141 light-probe lookups on the installed game had come back empty. The baker still never emits a BSP, and `cell_regions` still skips BSP leaves.
 - source_spec: none
   summary: Bring CI up to AD-15: `windows-latest` and `ubuntu-latest` both run fmt, clippy, tests and the benchmark; a separate MSRV 1.95 job; `cargo-semver-checks` on the published crates; workflow actions pinned by full commit SHA.
   evidence: Split from the crates.io release work (`spec-release-crates-io.md`) on 2026-10-13 by the user. Until it lands, the release reruns the gates `.github/workflows/ci.yml` has today (fmt on Ubuntu; clippy, test and bench on Windows).
@@ -99,3 +100,6 @@
   summary: Before the first publish, drop `Counters::stage_ns` from `tenebrae-runtime` and the clock that fills it (`traverse.rs` `Traversal::run` measures `clock.elapsed()`), and update `tenebrae-bench/examples/rtcount.rs`.
   evidence: AD-1 forbids clock access in library crates and durations in library counters; AD-10 allows dropping the field only before the first publish. Found 2026-10-13 while planning the release; it does not block the workflow, only the first `cargo publish`.
   resolved: 2026-10-13, in `spec-release-crates-io.md` (user brought it into scope): `stage_ns` and the runtime's clock removed, `rtcount` no longer prints stage times.
+- source_spec: `docs/implementation-artifacts/spec-fix-bsp-lookup-deep-keys.md`
+  summary: No committed stock-tome test detects a regression in the plane-BSP walk.
+  evidence: `stock_tomes_answer_queries` compares `Locator` with `find_cell`, which share `locate::local_cell`, and its region-centre check skips BSP leaves; engine agreement (9,994,752 / 9,994,752 grid points on 723 tomes, 2026-10-13) comes from an uncommitted reference harness. A count of lattice points in BSP leaves that resolve, asserted non-zero under `TENEBRAE_TOMES`, would partly close it.

@@ -94,7 +94,7 @@ A consumer project that adds or changes map content needs new tomes and a way to
 
 - Umbra versions or tome format versions other than 3.3.6 / v18.
 - Encoding the engine's visibility record, its key table or `+0x30`. The consumer owns them (AD-8).
-- Baker output with gates (openable portals) or plane BSP leaves. The model reads and writes them, but nothing bakes them.
+- Baker output with gates (openable portals) or plane BSP leaves. The model reads and writes them, and point lookups follow plane BSP leaves, but nothing bakes them.
 - Several view volumes in one bake call.
 - Any hosted service or GPU path. Publishing the crates (CAP-10) is in scope; running anything is not.
 - Knowledge of engine tags or keys. Identity enters only through `Target::user`.

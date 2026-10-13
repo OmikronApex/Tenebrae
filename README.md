@@ -81,6 +81,10 @@ let in_frustum = q.frustum(&rt, &camera)?;
   (`from_world_to_clip_cols`), or view and projection matrices with either depth range
   (`from_view_projection`). A query returns `Err(Status)` when the camera is in no cell, the
   matrix is degenerate or the traversal budget is exhausted; callers then fall back to `frustum`.
+- **Plane-BSP leaves (addition, not breaking):** `query::local_cell` (from `tome::locate`)
+  resolves one view-tree leaf to its local cell. `find_cell`, `Locator` and
+  `Runtime::find_cell` follow plane-BSP leaves of stock tomes to their local cell, where they
+  used to answer `None`.
 - **`Report::cell_points`** is `Vec<Option<Vec3>>` and `query::transfer` takes
   `&[Option<[f32; 3]>]`: with `Params::view_mask` (on by default, Umbra's strict view volumes),
   view trees resolve cells only within a voxel of the view volume, so a cell wholly outside it
