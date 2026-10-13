@@ -5,7 +5,7 @@ created: '2026-10-13'
 status: 'done'
 route: 'dispatch'
 review_loop_iteration: 0
-baseline_commit: '7be685d154063fa096e723dd716e258d7be02bb2'
+baseline_commit: 'f8e0ab31ca8ac2dee24cd223b1b184ef6c033f10'
 context:
   - '{project-root}/docs/planning-artifacts/architecture/architecture-Tenebrae-2026-10-11/ARCHITECTURE-SPINE.md'
 ---
@@ -28,11 +28,11 @@ context:
 - Authenticate with `rust-lang/crates-io-auth-action` (job permission `id-token: write`); no long-lived crates.io token in repository secrets. Actions in the new workflow are pinned by full commit SHA with the version in a comment.
 - The first publish of each crate is manual (trusted publishing needs the crate to exist); document it.
 - Decision (user, 2026-10-13): the publish job runs in a GitHub environment `release` with the owner as required reviewer, so every release waits for approval on the run page; the crates.io trusted publishers are bound to that environment.
+- Decision (user, 2026-10-13, renegotiated after review): drop `Counters::stage_ns` and the clock that fills it from `tenebrae-runtime` in this change, so the first publish satisfies AD-1 (AD-10 allows the removal only before it).
 - Decision (user, 2026-10-13): after publishing, the workflow creates a GitHub Release for the tag whose notes are the annotated tag's message; release tags must therefore be annotated.
 
 **Never:**
 - Upgrading CI to AD-15's matrix, MSRV job, semver checks, or re-pinning `ci.yml`'s existing actions (deferred).
-- Dropping `Counters::stage_ns` (deferred; it blocks the first publish, not this change).
 - Pushing a tag or publishing anything as part of this work.
 
 ## I/O & Edge-Case Matrix
@@ -67,8 +67,9 @@ context:
 - [x] `.github/workflows/ci.yml` -- add `workflow_call:` -- reuse the gates.
 - [x] `.github/workflows/release.yml` -- trigger on tags `v[0-9]+.[0-9]+.[0-9]+`; `verify` job (ancestor of `origin/main`, tag == workspace version); `gates` job calling `ci.yml`; `publish` job (needs both, `id-token: write`) authenticating and running `cargo publish --workspace` -- AD-14.
 - [x] `.github/workflows/release.yml` (cont.) -- `publish` runs in environment `release`; a final step creates the GitHub Release from the tag message (`contents: write`) -- user decisions.
-- [ ] GitHub repository settings -- create environment `release` with the owner as required reviewer (via `gh api`, with the user's go-ahead) -- the approval gate.
+- [x] GitHub repository settings -- create environment `release` with the owner as required reviewer (via `gh api`, with the user's go-ahead) -- the approval gate.
 - [x] `CONTRIBUTING.md` -- "Releasing" section -- the manual steps.
+- [x] `crates/tenebrae-runtime/src/query.rs`, `traverse.rs`, `crates/tenebrae-bench/examples/rtcount.rs` -- drop `Counters::stage_ns` and the clock in `Traversal::run`; `rtcount` stops printing stage times -- renegotiated decision (AD-1).
 
 **Acceptance Criteria:**
 - Given the changed manifests, when `cargo publish --workspace --dry-run` runs locally, then it packages and verifies exactly the five library crates, in dependency order.
@@ -85,6 +86,8 @@ context:
 
 - Review pass 1 patches (2026-10-13): `verify` compares the tag's commit with `GITHUB_SHA` and runs `cargo publish --workspace --dry-run` before gates and approval; each library crate carries a copy of the root `LICENSE` (cargo packages it; `license` stays the SPDX id, no `license-file`); CONTRIBUTING names the `stage_ns` prerequisite for the first publish and the Release-step-only recovery; AD-14 carries a dated amendment for the interim gate set.
 - The committed dry run packages and verifies all five crates before uploading any, so a build failure cannot leave a partial publish; only an upload-time failure can.
+
+- Renegotiated scope (user, 2026-10-13): `Counters::stage_ns` and the runtime's `Instant` removed; no library crate reads a clock now. fmt, clippy, 74 tests, 11 bench gates and the publish dry run pass. `rtcount` keeps its own wall-clock timing (bench crate, allowed by AD-1).
 
 ## Spec Change Log
 

@@ -98,3 +98,4 @@
 - source_spec: `docs/implementation-artifacts/spec-release-crates-io.md`
   summary: Before the first publish, drop `Counters::stage_ns` from `tenebrae-runtime` and the clock that fills it (`traverse.rs` `Traversal::run` measures `clock.elapsed()`), and update `tenebrae-bench/examples/rtcount.rs`.
   evidence: AD-1 forbids clock access in library crates and durations in library counters; AD-10 allows dropping the field only before the first publish. Found 2026-10-13 while planning the release; it does not block the workflow, only the first `cargo publish`.
+  resolved: 2026-10-13, in `spec-release-crates-io.md` (user brought it into scope): `stage_ns` and the runtime's clock removed, `rtcount` no longer prints stage times.

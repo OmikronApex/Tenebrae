@@ -103,11 +103,8 @@ fails on the versions already published); create the Release with
 - **GitHub environment.** Repository settings, Environments: create `release` with the owner as
   required reviewer. Or with the CLI:
   `gh api -X PUT repos/OmikronApex/Tenebrae/environments/release -F "reviewers[][type]=User" -F "reviewers[][id]=$(gh api users/OmikronApex --jq .id)"`.
-- **First publish (manual).** Prerequisite: drop `Counters::stage_ns` from `tenebrae-runtime` and
-  the clock that fills it (logged in `deferred-work.md`; AD-1, AD-10) before the first
-  `cargo publish`, or 0.1.0 locks the field in. Trusted publishing can only be configured for a
-  crate that exists, so the first version of each crate is published by hand: on the release
-  commit of `main`, with a crates.io API token (`cargo login`), run
+- **First publish (manual).** Trusted publishing can only be configured for a crate that exists,
+  so the first version of each crate is published by hand: on the release commit of `main`, with a crates.io API token (`cargo login`), run
   `cargo publish --workspace --dry-run`, then `cargo publish --workspace`, then revoke the token.
   Push the annotated tag afterwards. That run may stop at `verify` (its dry run finds the versions
   already uploaded) or reach the approval, which you then reject; either way, create the GitHub
