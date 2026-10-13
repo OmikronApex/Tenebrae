@@ -11,8 +11,8 @@
 
 use std::fmt;
 
-use tenebrae_tome::locate::{dequant, leaf_ranked, ranks};
-use tenebrae_tome::{Aabb, KdTree, Portal, RunList, Tile, TileCell, Tome};
+use tenebrae_tome::locate::{self, dequant, leaf_ranked, ranks};
+use tenebrae_tome::{Aabb, Bsp, KdTree, Portal, RunList, Tile, TileCell, Tome, ViewTree};
 
 /// Why a tome could not be decoded: an index that points outside the structure it addresses.
 /// A tome from `tenebrae_tome::read` or the baker never produces one.
@@ -82,29 +82,20 @@ pub(crate) struct CellData {
 /// A leaf tile's view tree with its lookups precomputed.
 #[derive(Clone, Debug)]
 pub(crate) struct ViewData {
-    pub(crate) tree: KdTree,
+    pub(crate) view: ViewTree,
     pub(crate) ranks: Vec<usize>,
     /// Per tree node, its leaf ordinal (meaningful for leaves).
     pub(crate) ordinal: Vec<usize>,
-    pub(crate) leaf_bits: u32,
-    pub(crate) leaf_values: Vec<u32>,
+    /// The tile's plane BSP, which leaves with the top bit set refine.
+    pub(crate) bsp: Option<Bsp>,
 }
 
 impl ViewData {
     /// The local cell at `p` inside the tile `bounds`: `None` outside the tile, in solid space,
-    /// or in a leaf refined by a plane BSP.
+    /// or where a plane BSP ends on no cell ([`locate::local_cell`]).
     pub(crate) fn local_cell(&self, bounds: Aabb, p: [f32; 3]) -> Option<u32> {
-        let v = leaf_ranked(&self.tree, &self.ranks, bounds, p)?;
-        let value = *self.leaf_values.get(*self.ordinal.get(v)?)?;
-        let all_ones = if self.leaf_bits >= 32 {
-            u32::MAX
-        } else {
-            (1u32 << self.leaf_bits) - 1
-        };
-        if value == all_ones || value >> (self.leaf_bits - 1) != 0 {
-            return None;
-        }
-        Some(value)
+        let v = leaf_ranked(&self.view.tree, &self.ranks, bounds, p)?;
+        locate::local_cell(&self.view, self.bsp.as_ref(), *self.ordinal.get(v)?, p)
     }
 }
 
@@ -451,11 +442,10 @@ impl Runtime {
                 k += usize::from(c == 3);
             }
             ViewData {
-                tree: v.tree.clone(),
+                view: v.clone(),
                 ranks: ranks(&v.tree),
                 ordinal,
-                leaf_bits: v.leaf_bits,
-                leaf_values: v.leaf_values.clone(),
+                bsp: tile.bsp.clone(),
             }
         });
         Ok(TileData {
@@ -490,7 +480,7 @@ impl Runtime {
     }
 
     /// The top node and local cell holding `p`: `None` outside the domain, in solid space, or
-    /// in a leaf refined by a plane BSP.
+    /// where a plane BSP ends on no cell or on one past the tile's cells.
     pub(crate) fn local_cell(&self, p: [f32; 3]) -> Option<(usize, u32)> {
         let node = leaf_ranked(&self.top, &self.top_ranks, self.bounds, p)?;
         let tile = self.tiles.get(node)?.as_ref()?;
@@ -510,5 +500,126 @@ impl Runtime {
         self.tiles[node as usize]
             .as_ref()
             .unwrap_or_else(|| unreachable!("node {node} has no tile"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tenebrae_tome::{Gates, GlobalCell, Header, PARAMS_SIZE, Users};
+
+    const UNIT: Aabb = Aabb {
+        min: [0.0; 3],
+        max: [1.0; 3],
+    };
+
+    fn node(plane: u32, front: (u16, bool), back: (u16, bool)) -> u64 {
+        let lo = plane | (u32::from(front.1) << 31) | (u32::from(back.1) << 30);
+        (u64::from(front.0) << 48) | (u64::from(back.0) << 32) | u64::from(lo)
+    }
+
+    /// One tile over the unit cube: x < 0.5 is local cell 0; above, a BSP splits on y, then on
+    /// z (cells 1 and 2, and no cell); local cell `k` is global cell `k`.
+    fn bsp_tome() -> Tome {
+        let runs = || RunList {
+            index_bits: 0,
+            run_bits: 0,
+            entries: Vec::new(),
+        };
+        let tile = Tile {
+            bounds: UNIT,
+            flags: 1,
+            level: 0.0,
+            cell_word_high: 0,
+            cells: (0..3)
+                .map(|g| TileCell([0, 0, 0, 0, g, 0, 0, 0xFFFF, 0xFFFF]))
+                .collect(),
+            portals: Vec::new(),
+            view: Some(ViewTree {
+                tree: KdTree {
+                    codes: vec![0, 3, 3],
+                    splits: Vec::new(),
+                },
+                leaf_bits: 8,
+                leaf_values: vec![0, 0x80],
+            }),
+            bsp: Some(Bsp {
+                nodes: vec![
+                    node(0, (1, true), (1, false)),
+                    node(1, (2, true), (0xFFFF, true)),
+                ],
+                planes: vec![[0.0, 1.0, 0.0, -0.5], [0.0, 0.0, 1.0, -0.5]],
+            }),
+        };
+        Tome {
+            header: Header {
+                flags: 0xD600,
+                hash: 0,
+                base_distance: 1.0,
+                word_10: 0,
+                bounds: UNIT,
+                word_34: 0,
+                list_widths_high: 0,
+                words_a4: [0; 3],
+                words_b0: [0; 2],
+                params: [0; PARAMS_SIZE],
+            },
+            top: KdTree {
+                codes: vec![3],
+                splits: Vec::new(),
+            },
+            node_distances: vec![0.0; 2],
+            objects: Vec::new(),
+            users: Users {
+                prefix: None,
+                ids: Vec::new(),
+            },
+            object_runs: runs(),
+            cell_runs: runs(),
+            global_cells: vec![
+                GlobalCell {
+                    portal_start: 0,
+                    portal_count: 0,
+                    bounds: [0, 0xFFFF, 0xFFFF],
+                };
+                3
+            ],
+            global_portals: Vec::new(),
+            gates: Gates::default(),
+            tiles: vec![Some(tile)],
+        }
+    }
+
+    #[test]
+    fn find_cell_follows_the_bsp_as_locate_does() {
+        let tome = bsp_tome();
+        let rt = Runtime::new(&tome).expect("decode");
+        let mut seen = [0usize; 4];
+        let steps = 24;
+        for i in 0..=steps {
+            for j in 0..=steps {
+                for k in 0..=steps {
+                    let p = [i, j, k].map(|s| s as f32 / steps as f32);
+                    let want = locate::find_cell(&tome, p);
+                    assert_eq!(rt.find_cell(p), want, "{p:?}");
+                    seen[want.map_or(3, |c| c as usize)] += 1;
+                }
+            }
+        }
+        assert!(seen.iter().all(|&n| n > 0), "{seen:?}");
+        assert_eq!(rt.find_cell([0.75, 0.25, 0.75]), Some(2));
+    }
+
+    #[test]
+    fn bsp_cell_past_the_cell_table_is_no_cell() {
+        let mut tome = bsp_tome();
+        if let Some(Some(tile)) = tome.tiles.first_mut() {
+            tile.cells.truncate(2);
+        }
+        let rt = Runtime::new(&tome).expect("decode");
+        for (p, want) in [([0.75, 0.25, 0.75], None), ([0.75, 0.75, 0.25], Some(1))] {
+            assert_eq!(rt.find_cell(p), want, "{p:?}");
+            assert_eq!(locate::find_cell(&tome, p), want, "{p:?}");
+        }
     }
 }
