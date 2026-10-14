@@ -56,7 +56,7 @@ use cache::TileCache;
 use grid::{Bits, Bricks, Grid};
 use tenebrae_geom::{Bounds, Bvh, Mesh, Vec3};
 use tenebrae_tome::{Aabb, Tome, Users};
-use tile::{Ctx, clip, tile_bytes_bound, touched_bricks, tri_ranges};
+use tile::{Ctx, Space, clip, space_of, tile_bytes_bound, touched_bricks, tri_ranges};
 
 /// An object the tome should answer for: its box and the caller's ids for it.
 #[derive(Clone, Copy, Debug)]
@@ -300,15 +300,39 @@ pub struct Params {
     /// How far past the view volume (metres, per side) the domain grows to take in the targets,
     /// as Umbra's tile grid covers the whole scene. Space there is baked into ordinary cells, so
     /// a target in it is listed where sight lines reach it instead of in every cell with a
-    /// boundary portal on that side. 0: the domain is the view volume, snapped to tiles.
+    /// boundary portal on that side. 0: the domain is the view volume, snapped to tiles. With
+    /// several view volumes ([`Params::extra_view_volumes`]) the margin is taken past the box
+    /// around all of them.
     ///
-    /// With [`Params::cell_merge`], a tile the view volume does not touch is built coarser, as
-    /// Umbra builds tiles outside every view volume (`tile::level_shift`): its merge threshold
-    /// is `cell_merge` doubled `k` times, `k` from the volume's thinnest extent (12 m for the stock
-    /// 64 m playable layer at 6), and its seed block grows to Umbra's cell level for that
-    /// feature (16 m). The stock parity tome has about 3 cells per 32 m tile outside the layer against
-    /// 30 inside; the camera never enters those tiles, but queries traverse them.
+    /// Tiles away from every view volume are built coarser with [`Params::coarsen_outside`].
+    /// Tiles outside the view volume no longer get the feature and seed block the old rule raised
+    /// from the volume's thinnest extent, so a margin bake differs from earlier versions even with
+    /// `coarsen_outside` off.
     pub domain_margin: f32,
+    /// With [`Params::cell_merge`] (`SO`): tiles away from every view volume are baked on coarse
+    /// voxels, as Umbra builds tiles outside its view volumes. The camera never enters them, but
+    /// on a large margin they are most of the domain. Each tile gets a level shift `k`
+    /// (`tile::level_shift`): 0 when it overlaps a view volume grown by
+    /// `pad = max(1.6 SO, 2 voxel)`; otherwise, with `d` its least distance to a view volume and
+    /// `q = d / (4 SO) - 1`, `k = 1 + floor(log2 q)` when `q >= 1`, else 1, capped so that
+    /// `2^k` divides the tile's voxel count. A tile at `k > 0` is voxelised at `voxel · 2^k`, with
+    /// lever L2's threshold `SO · 2^k` and seed blocks of the same voxel count (so `2^k` times
+    /// larger, at most the tile). At SO 6, 0.125 m voxels and 32 m tiles: `d` under 72 m gives
+    /// 0.25 m voxels, under 120 m 0.5 m, under 216 m 1 m, under 408 m 2 m, under 792 m 4 m. Such
+    /// a tile still reports cells, portals and seams at the grid's voxel, so its neighbours, the
+    /// flood across tiles and the tome are built as for any tile; two sibling leaf tiles that are
+    /// both coarse may collapse up to `tile · 2^min(k)`. Off, or with `cell_merge` 0, every tile
+    /// is baked at `voxel`, with the feature and seed block of a tile inside the volumes (the old
+    /// thinnest-extent raise of outside tiles is gone). Tiles touching a view volume never change.
+    /// It matters only with a domain margin or several view volumes (tiles in the gap between
+    /// volumes coarsen even at margin 0).
+    pub coarsen_outside: bool,
+    /// More view volumes beside [`Input::view_volume`]: the camera may be in any of them. The
+    /// domain covers all of them, the view mask ([`Params::view_mask`]) keeps the union of their
+    /// voxel ranges, unreachable-cell removal starts each cell from the box around its overlaps
+    /// with the volumes, and [`Params::coarsen_outside`] measures distance to the
+    /// nearest. Each is checked as `view_volume` is (finite, not empty). Default: none.
+    pub extra_view_volumes: Vec<Aabb>,
     /// Cells share object-run windows (`+0x58`): a cell whose run entries already appear, in
     /// order, in the stream points at them instead of appending its own, and a new list reuses
     /// the stream's tail where it matches, longest lists first. Umbra packs its lists the same
@@ -389,6 +413,8 @@ impl Default for Params {
             midpoint_views: true,
             view_mask: true,
             domain_margin: 0.0,
+            coarsen_outside: true,
+            extra_view_volumes: Vec::new(),
             share_lists: true,
             lod_tiles: true,
             keep_every_target: false,
@@ -466,8 +492,8 @@ pub struct Input<'a> {
     /// Objects, one per target in this order (see [`Baked::object_map`]). A target reaching past
     /// the domain is also listed in every cell with a boundary portal on that side.
     pub targets: &'a [Target<'a>],
-    /// Where the camera may be; also the tome's domain (snapped outward to whole tiles; see
-    /// [`Params::domain_margin`]).
+    /// Where the camera may be (with [`Params::extra_view_volumes`]); also the tome's domain, with
+    /// the extra volumes (snapped outward to whole tiles; see [`Params::domain_margin`]).
     pub view_volume: Aabb,
     /// Points known to be open space the camera can reach (spawn points, sample camera
     /// positions). With [`SolidMode::Flood`] they seed the open space besides the domain boundary.
@@ -481,7 +507,8 @@ pub struct Input<'a> {
 pub struct Report {
     /// Tiles (leaf nodes of the top tree).
     pub tiles: usize,
-    /// Voxels: total, touched by triangles, solid.
+    /// Voxels: total, touched by triangles, solid. In grid voxels: a coarse tile's voxel
+    /// ([`Params::coarsen_outside`]) counts as the `8^k` grid voxels it covers.
     pub voxels: [usize; 3],
     /// Tile cells (leaf-tile cells of the tome, summed over tiles). With
     /// [`Params::global_groups`] there are fewer global cells than tile cells.
@@ -669,21 +696,28 @@ pub struct Voxels {
     pub tiles: [usize; 3],
     tile_size: usize,
     tile_at: Vec<usize>,
+    /// Per tile, grid voxels per voxel of its fields ([`Params::coarsen_outside`]).
+    scales: Vec<usize>,
     fields: Vec<(Bits, Bits)>,
 }
 
 impl Voxels {
+    /// The tile holding grid voxel `v` and `v`'s voxel in that tile's fields (a coarse tile's
+    /// voxel covering it).
     fn locate(&self, v: [usize; 3]) -> (usize, [usize; 3]) {
         let s = self.tile_size;
         let t = self.tile_at[((v[2] / s) * self.tiles[1] + v[1] / s) * self.tiles[0] + v[0] / s];
-        (t, [v[0] % s, v[1] % s, v[2] % s])
+        let k = self.scales[t];
+        (t, [v[0] % s / k, v[1] % s / k, v[2] % s / k])
     }
-    /// An occluder triangle crosses voxel `v`'s interior.
+    /// An occluder triangle crosses voxel `v`'s interior. In a coarse tile
+    /// ([`Params::coarsen_outside`]) it answers for the coarse voxel covering grid voxel `v`.
     pub fn surface(&self, v: [usize; 3]) -> bool {
         let (t, l) = self.locate(v);
         self.fields[t].0.get(l)
     }
-    /// Voxel `v` occludes (no cell).
+    /// Voxel `v` occludes (no cell). In a coarse tile it answers for the coarse voxel covering
+    /// grid voxel `v`.
     pub fn solid(&self, v: [usize; 3]) -> bool {
         let (t, l) = self.locate(v);
         self.fields[t].1.get(l)
@@ -749,12 +783,13 @@ fn validate(input: &Input<'_>) -> Result<(), Error> {
             "collapse size must be finite and not negative",
         ));
     }
-    let vv = &input.view_volume;
-    if !valid_box(vv) {
-        return Err(Error::Params("view volume must be finite with min <= max"));
-    }
-    if (0..3).any(|a| vv.max[a] <= vv.min[a]) {
-        return Err(Error::Params("empty view volume"));
+    for vv in std::iter::once(&input.view_volume).chain(&p.extra_view_volumes) {
+        if !valid_box(vv) {
+            return Err(Error::Params("view volume must be finite with min <= max"));
+        }
+        if (0..3).any(|a| vv.max[a] <= vv.min[a]) {
+            return Err(Error::Params("empty view volume"));
+        }
     }
     let meshes = match input.occluders {
         Occluders::Soup(m) => std::slice::from_ref(m),
@@ -831,10 +866,20 @@ fn prepare<'a>(input: &'a Input<'a>, progress: &mut Progressor<'_>) -> Result<Pr
     let limit = p.memory_limit;
     let overflow = || too_large(u64::MAX, limit);
     let per_tile = (p.tile / p.voxel).round() as usize;
-    // The domain: the view volume, grown to cover the targets up to `domain_margin` past it.
+    let volumes: Vec<Aabb> = std::iter::once(input.view_volume)
+        .chain(p.extra_view_volumes.iter().copied())
+        .collect();
+    // The domain: the box around the view volumes, grown to cover the targets up to
+    // `domain_margin` past it.
     let mut vv = input.view_volume;
+    for v in &volumes[1..] {
+        for a in 0..3 {
+            vv.min[a] = vv.min[a].min(v.min[a]);
+            vv.max[a] = vv.max[a].max(v.max[a]);
+        }
+    }
     if p.domain_margin > 0.0 {
-        let view = input.view_volume;
+        let view = vv;
         for t in input.targets {
             for a in 0..3 {
                 vv.min[a] = vv.min[a].min(t.bounds.min[a].max(view.min[a] - p.domain_margin));
@@ -880,16 +925,7 @@ fn prepare<'a>(input: &'a Input<'a>, progress: &mut Progressor<'_>) -> Result<Pr
     };
     // Bricks: the largest power of two up to 16 voxels dividing both the tile and the block, so a
     // uniform brick never straddles a seed block.
-    let mut shift = 4u32;
-    while !per_tile.is_multiple_of(1 << shift)
-        || block.is_some_and(|b| b > 0 && !b.is_multiple_of(1 << shift))
-    {
-        shift -= 1;
-    }
-    let layout = Bricks {
-        shift,
-        n: per_tile >> shift,
-    };
+    let layout = Bricks::for_tile(per_tile, block);
     let flood = p.solid == SolidMode::Flood;
     let dense_cells = !flood || block.is_none();
     // Refuse before bucketing when even empty tiles do not fit.
@@ -935,10 +971,27 @@ fn prepare<'a>(input: &'a Input<'a>, progress: &mut Progressor<'_>) -> Result<Pr
     if flood && !input.seeds.is_empty() && seeds.is_empty() {
         return Err(Error::Params("no seed inside the domain"));
     }
-    // Bucket triangles per tile and mark the bricks they may touch.
+    // Level shift and voxel space per tile (`Params::coarsen_outside`).
+    let coarse = p.coarsen_outside && p.cell_merge > 0.0;
+    let shifts: Vec<u32> = tile_ranges
+        .iter()
+        .map(|r| {
+            if coarse {
+                let frame = tile::tile_frame(&grid, p.tile, r);
+                tile::level_shift(&volumes, &frame, p.cell_merge, p.voxel, per_tile)
+            } else {
+                0
+            }
+        })
+        .collect();
+    let spaces: Vec<Space> = tile_ranges
+        .iter()
+        .zip(&shifts)
+        .map(|(r, &k)| space_of(&grid, layout, block, r, k))
+        .collect();
+    // Bucket triangles per tile and mark the bricks they may touch, in each tile's own space.
     let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); ntiles];
     let mut touched: Vec<Option<Vec<u64>>> = vec![None; ntiles];
-    let words = layout.count().div_ceil(64);
     let ntris = tris.len();
     progress.report(Stage::Prepare, 0, u64::from(ntris))?;
     for ti in 0..ntris {
@@ -956,13 +1009,21 @@ fn prepare<'a>(input: &'a Input<'a>, progress: &mut Progressor<'_>) -> Result<Pr
             for ty in t0[1]..=t1[1] {
                 for tx in t0[0]..=t1[0] {
                     let t = tile_at[(tz * tiles_n[1] + ty) * tiles_n[0] + tx];
-                    let lo = [tx * per_tile, ty * per_tile, tz * per_tile];
-                    let Some(cl) = clip(e, lo, per_tile) else {
+                    let sp = &spaces[t];
+                    // A coarse tile's ranges are its own voxels'; its voxels test only what
+                    // reaches the tile's box, which the grid's ranges above already cover.
+                    let e = if sp.s == 1 {
+                        e
+                    } else {
+                        tri_ranges(&sp.grid, &c).1
+                    };
+                    let Some(cl) = clip(e, sp.lo, sp.layout.tile()) else {
                         continue;
                     };
+                    let words = sp.layout.count().div_ceil(64);
                     let set = touched[t].get_or_insert_with(|| vec![0u64; words]);
                     let mut any = false;
-                    touched_bricks(&grid, layout, lo, &c, cl, |b, _| {
+                    touched_bricks(&sp.grid, sp.layout, sp.lo, &c, cl, |b, _| {
                         set[b / 64] |= 1 << (b % 64);
                         any = true;
                     });
@@ -983,10 +1044,12 @@ fn prepare<'a>(input: &'a Input<'a>, progress: &mut Progressor<'_>) -> Result<Pr
             .iter()
             .map(|t| (t.as_ref().map_or(0, |w| w.len() * 8) + size_of::<Option<Vec<u64>>>()) as u64)
             .sum::<u64>();
-    let edge = layout.edge() as u64;
     let mut bounds = Vec::with_capacity(ntiles);
     let mut layer_bound = 0u64;
-    for set in &touched {
+    for (set, sp) in touched.iter().zip(&spaces) {
+        // Each tile at its own resolution; its layers leave it at the grid's, `s` rows per row.
+        let layout = sp.layout;
+        let edge = layout.edge() as u64;
         let is = |b: [usize; 3]| {
             set.as_ref()
                 .is_some_and(|w| w[layout.index(b) / 64] >> (layout.index(b) % 64) & 1 == 1)
@@ -1032,7 +1095,7 @@ fn prepare<'a>(input: &'a Input<'a>, progress: &mut Progressor<'_>) -> Result<Pr
                         b[a1] = k1;
                         b[a2] = k2;
                         if is(b) {
-                            layer_bound += 8 * edge * edge;
+                            layer_bound += 8 * edge * edge * sp.s as u64;
                         }
                     }
                 }
@@ -1100,6 +1163,8 @@ fn prepare<'a>(input: &'a Input<'a>, progress: &mut Progressor<'_>) -> Result<Pr
             parity,
             tris,
             soup,
+            volumes,
+            shifts,
         },
         top,
         global_bytes: global_bytes - sets * layer_bound - parity_bytes,
@@ -1464,6 +1529,7 @@ pub fn voxelize(input: &Input<'_>) -> Result<Voxels, Error> {
         tiles: ctx.tiles_n,
         tile_size: ctx.layout.tile(),
         tile_at: ctx.tile_at.clone(),
+        scales: (0..n).map(|t| ctx.space(t).s).collect(),
         fields,
     })
 }

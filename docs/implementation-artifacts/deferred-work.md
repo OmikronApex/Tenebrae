@@ -103,3 +103,9 @@
 - source_spec: `docs/implementation-artifacts/spec-fix-bsp-lookup-deep-keys.md`
   summary: No committed stock-tome test detects a regression in the plane-BSP walk.
   evidence: `stock_tomes_answer_queries` compares `Locator` with `find_cell`, which share `locate::local_cell`, and its region-centre check skips BSP leaves; engine agreement (9,994,752 / 9,994,752 grid points on 723 tomes, 2026-10-13) comes from an uncommitted reference harness. A count of lattice points in BSP leaves that resolve, asserted non-zero under `TENEBRAE_TOMES`, would partly close it.
+- source_spec: `docs/implementation-artifacts/spec-outside-volume-coarsening.md`
+  summary: The bake-time gain of distance coarsening is unmeasured on a large real bubble (only a small test scene, ~108 ms vs ~176 ms).
+  evidence: Unverified, medium if the gain falls short. A fresh and cached bake of a large bubble with a stock-like playable volume and a large `domain_margin`, `coarsen_outside` on vs off (wall time, peak memory, global cells, tome size), would settle it; it needs game-derived scenes this repository does not hold.
+- source_spec: `docs/implementation-artifacts/spec-outside-volume-coarsening.md`
+  summary: In `tile::flood_solid` the "surface voxel touches live space" read (now `tile::layer_reaches_live`) never changes a voxel's solidity.
+  evidence: With `surface_occludes` a surface voxel is solid unless it holds a seed, and without it a surface voxel is never solid, whatever `reached` says; pre-existing, found while testing the coarse seam read. Removing it changes no bake but should be checked against the dense reference.

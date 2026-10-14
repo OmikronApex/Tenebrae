@@ -47,6 +47,21 @@ pub(super) struct Bricks {
 }
 
 impl Bricks {
+    /// The layout of a tile of `size` voxels per edge: bricks of the largest power of two up to
+    /// 16 voxels dividing both the tile and the seed block (`block`, when not 0), so a uniform
+    /// brick never straddles a seed block.
+    pub(super) fn for_tile(size: usize, block: Option<usize>) -> Bricks {
+        let mut shift = 4u32;
+        while !size.is_multiple_of(1 << shift)
+            || block.is_some_and(|b| b > 0 && !b.is_multiple_of(1 << shift))
+        {
+            shift -= 1;
+        }
+        Bricks {
+            shift,
+            n: size >> shift,
+        }
+    }
     pub(super) fn edge(&self) -> usize {
         1 << self.shift
     }
@@ -413,6 +428,34 @@ impl Layer {
     }
     pub(super) fn bytes(&self) -> usize {
         self.runs.capacity() * 8 + size_of::<Layer>()
+    }
+    /// The layer of a face `s` times finer: each position of this layer, in rows of `row`
+    /// positions, becomes `s × s` positions with its value, in rows of `row * s`. The runs are
+    /// the ones [`Layer::push`] builds for those values, so the result equals a layer built at
+    /// the finer resolution directly. `s = 1` returns the layer as it is.
+    pub(super) fn upsample(self, row: usize, s: usize) -> Layer {
+        if s == 1 {
+            return self;
+        }
+        let mut out = Layer::default();
+        let rows = self.len as usize / row.max(1);
+        let mut i = 0usize;
+        for r in 0..rows {
+            let (start, end) = ((r * row) as u32, ((r + 1) * row) as u32);
+            while i + 1 < self.runs.len() && self.runs[i + 1].0 <= start {
+                i += 1;
+            }
+            for _ in 0..s {
+                let (mut j, mut p) = (i, start);
+                while p < end {
+                    let e = self.runs.get(j + 1).map_or(self.len, |n| n.0).min(end);
+                    out.push(self.runs[j].1, (e - p) as usize * s);
+                    p = e;
+                    j += 1;
+                }
+            }
+        }
+        out
     }
 }
 

@@ -50,6 +50,65 @@ pub(super) struct Ctx<'a> {
     pub(super) tris: super::Tris<'a>,
     /// Parity mode: the occluders as one world-space mesh (the cache hashes it).
     pub(super) soup: Option<std::borrow::Cow<'a, tenebrae_geom::Mesh>>,
+    /// The view volumes: [`Input::view_volume`], then [`super::Params::extra_view_volumes`].
+    pub(super) volumes: Vec<Aabb>,
+    /// Per tile, its level shift `k` ([`level_shift`]): the tile is baked on voxels `2^k` times
+    /// the grid's.
+    pub(super) shifts: Vec<u32>,
+}
+
+/// The voxel space a tile's passes run in: the grid's voxels for a tile at level shift 0, else
+/// voxels `s = 2^k` times larger. Coarse voxels align with the grid's, since tile origins are
+/// whole tiles from the grid origin and `s` divides the tile's voxel count, so coarse voxel `v`
+/// covers grid voxels `v * s .. (v + 1) * s` per axis.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Space {
+    /// The grid at this space's voxel (`dims` in its voxels).
+    pub(super) grid: Grid,
+    pub(super) layout: Bricks,
+    /// The tile's minimum corner, in this space's voxels.
+    pub(super) lo: [usize; 3],
+    /// Grid voxels per voxel of this space, per axis.
+    pub(super) s: usize,
+    /// The seed block in this space's voxels: [`Ctx::block`] (the same voxel count, so a block
+    /// `s` times larger), capped at the tile.
+    pub(super) block: Option<usize>,
+}
+
+/// The space of the tile over tile-grid range `range` at level shift `k`, on a grid of tiles laid
+/// out by `layout` with seed block `block` (see [`Space`]).
+pub(super) fn space_of(
+    grid: &Grid,
+    layout: Bricks,
+    block: Option<usize>,
+    range: &[[usize; 2]; 3],
+    k: u32,
+) -> Space {
+    let pt = layout.tile();
+    let lo = [range[0][0] * pt, range[1][0] * pt, range[2][0] * pt];
+    if k == 0 {
+        return Space {
+            grid: *grid,
+            layout,
+            lo,
+            s: 1,
+            block,
+        };
+    }
+    let s = 1usize << k;
+    let size = pt / s;
+    let block = block.map(|b| b.min(size));
+    Space {
+        grid: Grid {
+            origin: grid.origin,
+            voxel: grid.voxel * s as f32,
+            dims: grid.dims.map(|d| d / s),
+        },
+        layout: Bricks::for_tile(size, block),
+        lo: lo.map(|x| x / s),
+        s,
+        block,
+    }
 }
 
 impl Ctx<'_> {
@@ -59,29 +118,23 @@ impl Ctx<'_> {
         let r = &self.tile_ranges[t];
         [r[0][0] * pt, r[1][0] * pt, r[2][0] * pt]
     }
-    /// Umbra's level shift of tile `t`: 0 inside the view volume, else [`level_shift`].
+    /// The level shift of tile `t` ([`level_shift`]; 0 near every view volume).
     pub(super) fn level_shift(&self, t: usize) -> u32 {
-        if self.cell_merge <= 0.0 {
-            return 0;
-        }
-        let frame = tile_frame(&self.grid, self.input.params.tile, &self.tile_ranges[t]);
-        level_shift(&self.input.view_volume, &frame, self.cell_merge)
+        self.shifts[t]
+    }
+    /// The voxel space tile `t`'s passes run in.
+    pub(super) fn space(&self, t: usize) -> Space {
+        space_of(
+            &self.grid,
+            self.layout,
+            self.block,
+            &self.tile_ranges[t],
+            self.shifts[t],
+        )
     }
     /// Lever L2's threshold `R` for tile `t` in metres: `cell_merge`, doubled per level shift.
     pub(super) fn feature(&self, t: usize) -> f32 {
         self.cell_merge * (1u32 << self.level_shift(t)) as f32
-    }
-    /// The seed block of tile `t` in voxels: [`Ctx::block`], or the block Umbra's cell level
-    /// gives the raised feature of a tile outside the view volume, whichever is larger.
-    pub(super) fn block_of(&self, t: usize) -> Option<usize> {
-        let block = self.block?;
-        let k = self.level_shift(t);
-        if k == 0 || block == 0 {
-            return Some(block);
-        }
-        let p = &self.input.params;
-        let raised = cell_level_block(p.tile, self.feature(t), self.grid.voxel);
-        Some(raised.clamp(block, self.layout.tile()))
     }
     /// The tile across face `(axis, side)`, if inside the domain.
     pub(super) fn neighbour(&self, t: usize, axis: usize, side: usize) -> Option<usize> {
@@ -209,12 +262,13 @@ pub(super) struct Vox {
 }
 
 /// Voxelises the tile's triangles exactly as the whole-grid baker did, voxel by voxel, skipping
-/// bricks and 4-voxel sub-blocks the triangle cannot touch.
+/// bricks and 4-voxel sub-blocks the triangle cannot touch. Runs in the tile's [`Space`].
 pub(super) fn voxelize_tile(ctx: &Ctx<'_>, t: usize) -> Vox {
-    let g = &ctx.grid;
-    let layout = ctx.layout;
+    let sp = ctx.space(t);
+    let g = &sp.grid;
+    let layout = sp.layout;
     let size = layout.tile();
-    let lo = ctx.lo(t);
+    let lo = sp.lo;
     let voxel = g.voxel;
     let eps = voxel * 1e-3;
     let edge = layout.edge();
@@ -405,16 +459,22 @@ pub(super) fn label(vox: &Vox) -> (Field<u32>, usize) {
     (labels, count as usize)
 }
 
-/// Seed voxels inside the tile (tile-local linear indices, sorted), and whether the flood starts
-/// from the domain boundary instead (no seeds given).
+/// Seed voxels inside the tile (tile-local linear indices in the tile's [`Space`], sorted: a seed
+/// in a coarse tile seeds its coarse voxel), and whether the flood starts from the domain
+/// boundary instead (no seeds given).
 pub(super) fn starts(ctx: &Ctx<'_>, t: usize) -> (Vec<usize>, bool) {
-    let size = ctx.layout.tile();
+    let fine = ctx.layout.tile();
     let lo = ctx.lo(t);
+    let sp = ctx.space(t);
+    let (size, s) = (sp.layout.tile(), sp.s);
     let mut seeds: Vec<usize> = ctx
         .seeds
         .iter()
-        .filter(|s| (0..3).all(|a| s[a] >= lo[a] && s[a] < lo[a] + size))
-        .map(|s| ((s[2] - lo[2]) * size + (s[1] - lo[1])) * size + (s[0] - lo[0]))
+        .filter(|v| (0..3).all(|a| v[a] >= lo[a] && v[a] < lo[a] + fine))
+        .map(|v| {
+            let l = [0, 1, 2].map(|a| (v[a] - lo[a]) / s);
+            (l[2] * size + l[1]) * size + l[0]
+        })
         .collect();
     seeds.sort_unstable();
     seeds.dedup();
@@ -463,8 +523,8 @@ pub(super) fn flood_pass(ctx: &Ctx<'_>, t: usize) -> Flood {
     let vox = voxelize_tile(ctx, t);
     let (labels, count) = label(&vox);
     let bytes = vox_bytes(&vox) + labels.bytes();
-    let layout = ctx.layout;
-    let size = layout.tile();
+    let sp = ctx.space(t);
+    let size = sp.layout.tile();
     let (seeds, edge) = starts(ctx, t);
     let mut seeded = Vec::new();
     for &s in &seeds {
@@ -474,7 +534,9 @@ pub(super) fn flood_pass(ctx: &Ctx<'_>, t: usize) -> Flood {
             seeded.push(l);
         }
     }
-    let layers: [Layer; 6] = std::array::from_fn(|f| label_layer(&vox, &labels, f / 2, f % 2));
+    // Layers at the grid's resolution, so the join sees every tile alike.
+    let layers: [Layer; 6] =
+        std::array::from_fn(|f| label_layer(&vox, &labels, f / 2, f % 2).upsample(size, sp.s));
     if edge {
         for (f, layer) in layers.iter().enumerate() {
             if ctx.on_boundary(t, f / 2, f % 2) {
@@ -525,11 +587,13 @@ fn flood_solid(
     floods: &[Flood],
 ) -> (Bits, usize) {
     let (labels, _) = label(vox);
-    let layout = ctx.layout;
+    let sp = ctx.space(t);
+    let layout = sp.layout;
     let size = layout.tile();
     let edge_len = layout.edge();
-    let lo = ctx.lo(t);
-    let dims = ctx.grid.dims;
+    let lo = sp.lo;
+    let dims = sp.grid.dims;
+    let (s, fine) = (sp.s, ctx.layout.tile());
     let occlude = ctx.input.params.surface_occludes;
     let (seeds, edge) = starts(ctx, t);
     let lin = |v: [usize; 3]| (v[2] * size + v[1]) * size + v[0];
@@ -541,7 +605,6 @@ fn flood_solid(
     let touches_live = |v: [usize; 3]| {
         for a in 0..3 {
             let (a1, a2) = ((a + 1) % 3, (a + 2) % 3);
-            let p = (v[a2] * size + v[a1]) as u32;
             if v[a] + 1 < size {
                 let mut w = v;
                 w[a] += 1;
@@ -551,8 +614,8 @@ fn flood_solid(
             } else if let Some(n) = neighbours[a * 2 + 1]
                 && !vox.blocked[a].get(v)
             {
-                let x = floods[n].layers[a * 2].at(p) & LABEL;
-                if x != LABEL && live[n][x as usize] {
+                let layer = &floods[n].layers[a * 2];
+                if layer_reaches_live(layer, &live[n], [v[a1], v[a2]], s, fine, false) {
                     return true;
                 }
             }
@@ -563,9 +626,8 @@ fn flood_solid(
                     return true;
                 }
             } else if let Some(n) = neighbours[a * 2] {
-                let x = floods[n].layers[a * 2 + 1].at(p);
-                let l = x & LABEL;
-                if x >> 31 == 0 && l != LABEL && live[n][l as usize] {
+                let layer = &floods[n].layers[a * 2 + 1];
+                if layer_reaches_live(layer, &live[n], [v[a1], v[a2]], s, fine, true) {
                     return true;
                 }
             }
@@ -616,12 +678,33 @@ fn flood_solid(
     (solid, bytes)
 }
 
+/// Whether face voxel `j = (j1, j2)` of a tile's space (`s` grid voxels per voxel) reaches a live
+/// label of a neighbour's pass-A layer `layer` (`fine` positions per row, the grid's resolution):
+/// any of the `s × s` positions under it may. `below`: the layer is the `+` face of the
+/// neighbour below, whose blocked bit (bit 31) closes the face.
+pub(super) fn layer_reaches_live(
+    layer: &Layer,
+    live: &[bool],
+    j: [usize; 2],
+    s: usize,
+    fine: usize,
+    below: bool,
+) -> bool {
+    (0..s * s).any(|d| {
+        let p = ((j[1] * s + d / s) * fine + j[0] * s + d % s) as u32;
+        let x = layer.at(p);
+        let l = x & LABEL;
+        (!below || x >> 31 == 0) && l != LABEL && live[l as usize]
+    })
+}
+
 fn parity_solid(ctx: &Ctx<'_>, t: usize, vox: &Vox, parity: &(Bvh, Bounds)) -> (Bits, usize) {
     let (bvh, reach) = parity;
-    let g = &ctx.grid;
-    let layout = ctx.layout;
+    let sp = ctx.space(t);
+    let g = &sp.grid;
+    let layout = sp.layout;
     let size = layout.tile();
-    let lo = ctx.lo(t);
+    let lo = sp.lo;
     let mut votes = vec![0u8; size * size * size];
     let mut hits = Vec::new();
     for axis in 0..3 {
@@ -741,10 +824,14 @@ pub(super) fn cell_pass(
     peak: usize,
     overlap: &[u32],
 ) -> TileOut {
-    let layout = ctx.layout;
-    let lo = ctx.lo(t);
+    let sp = ctx.space(t);
+    let layout = sp.layout;
+    let lo = sp.lo;
+    let (s, size) = (sp.s, layout.tile());
+    // Grid voxels per voxel of the tile's space.
+    let cube = (s * s * s) as u64;
     let solid_count = solid.count();
-    let (mut cell_of, mut boxes) = match ctx.block_of(t) {
+    let (mut cell_of, mut boxes) = match sp.block {
         Some(block) => component_cells(layout, &solid, block),
         None => box_cells(layout, &solid),
     };
@@ -755,7 +842,7 @@ pub(super) fn cell_pass(
         merge(&mut cell_of, &mut boxes, fill, cap);
     }
     if ctx.cell_merge > 0.0 {
-        umbra_merge(&mut cell_of, &mut boxes, ctx.grid.voxel, ctx.feature(t));
+        umbra_merge(&mut cell_of, &mut boxes, sp.grid.voxel, ctx.feature(t));
     }
     drop(solid);
     cell_of.compact();
@@ -768,7 +855,7 @@ pub(super) fn cell_pass(
             }
         });
     }
-    let samples = samples(&ctx.grid, &cell_of, lo, &open);
+    let samples = samples(&sp.grid, &cell_of, lo, &open);
     let layers: [Layer; 6] = std::array::from_fn(|f| {
         face_layer(
             layout,
@@ -778,8 +865,8 @@ pub(super) fn cell_pass(
             |v| cell_of.get(v),
         )
     });
-    let faces = faces(ctx, t, &cell_of, &layers);
-    let objects = objects(ctx, &cell_of, &boxes, lo, overlap);
+    let faces = faces(ctx, t, &sp, &cell_of, &layers);
+    let objects = objects(ctx, &sp, &cell_of, &boxes, overlap);
     let midpoint = ctx.input.params.midpoint_views;
     let (view, choices) = view_of(&cell_of, midpoint);
     bytes = bytes.max(cell_of.bytes() + view.bytes());
@@ -787,24 +874,27 @@ pub(super) fn cell_pass(
     let (tree, choices) = if midpoint {
         let frame = tile_frame(&ctx.grid, ctx.input.params.tile, &ctx.tile_ranges[t]);
         let mut view = view;
-        if let Some(rg) = view_range(ctx, t) {
-            mask_view(&mut view, &rg);
+        if let Some(ranges) = view_range(ctx, t) {
+            mask_view(&mut view, &ranges);
         }
-        midpoint_view_tree(&ctx.grid, &view, &choices, lo, frame)
+        midpoint_view_tree(&sp.grid, &view, &choices, lo, frame)
     } else {
-        (view_tree(&ctx.grid, &view, lo), Vec::new())
+        (view_tree(&sp.grid, &view, lo), Vec::new())
     };
+    // Everything below leaves the tile at the grid's resolution, so seams, the join, the global
+    // stage and the cache see every tile alike.
     let cells = boxes
         .iter()
         .zip(open)
         .zip(samples)
         .map(|((&(blo, bhi), voxels), samples)| CellOut {
-            lo: [blo[0] + lo[0], blo[1] + lo[1], blo[2] + lo[2]],
-            hi: [bhi[0] + lo[0], bhi[1] + lo[1], bhi[2] + lo[2]],
-            voxels,
+            lo: [0, 1, 2].map(|a| (blo[a] + lo[a]) * s),
+            hi: [0, 1, 2].map(|a| (bhi[a] + lo[a]) * s),
+            voxels: voxels * cube,
             samples,
         })
         .collect();
+    let layers = layers.map(|l| l.upsample(size, s));
     let layer_bytes = layers.iter().map(|l| l.bytes() as u64).sum();
     TileOut {
         cells,
@@ -813,8 +903,8 @@ pub(super) fn cell_pass(
         tree,
         choices,
         objects,
-        surface: surface_count,
-        solid: solid_count,
+        surface: surface_count * cube as usize,
+        solid: solid_count * cube as usize,
         bytes,
         layer_bytes,
     }
@@ -1252,10 +1342,18 @@ fn samples(grid: &Grid, cell_of: &Field<u32>, lo: [usize; 3], open: &[u64]) -> V
     out
 }
 
-/// The tile's faces toward other cells of the tile and toward the domain boundary.
-fn faces(ctx: &Ctx<'_>, t: usize, cell_of: &Field<u32>, layers: &[Layer; 6]) -> Vec<Face> {
-    let lo = ctx.lo(t);
-    let size = ctx.layout.tile();
+/// The tile's faces toward other cells of the tile and toward the domain boundary, from the cells
+/// and face layers in the tile's space `sp`, in grid voxels (coalesced at the grid's resolution).
+fn faces(
+    ctx: &Ctx<'_>,
+    t: usize,
+    sp: &Space,
+    cell_of: &Field<u32>,
+    layers: &[Layer; 6],
+) -> Vec<Face> {
+    let lo = sp.lo;
+    let size = sp.layout.tile();
+    let s = sp.s as u32;
     // (cell, axis, side, neighbour, plane) -> face pieces.
     type Key = (u32, u8, u8, u32, u32);
     let mut map: HashMap<Key, Vec<[u32; 4]>> = HashMap::new();
@@ -1265,12 +1363,12 @@ fn faces(ctx: &Ctx<'_>, t: usize, cell_of: &Field<u32>, layers: &[Layer; 6]) -> 
     pairs(cell_of, |c, d, a, k, rect, _| {
         let (a1, a2) = ((a + 1) % 3, (a + 2) % 3);
         let r = [
-            (rect[0] + lo[a1]) as u32,
-            (rect[1] + lo[a1]) as u32,
-            (rect[2] + lo[a2]) as u32,
-            (rect[3] + lo[a2]) as u32,
+            (rect[0] + lo[a1]) as u32 * s,
+            (rect[1] + lo[a1]) as u32 * s,
+            (rect[2] + lo[a2]) as u32 * s,
+            (rect[3] + lo[a2]) as u32 * s,
         ];
-        let k = (k + lo[a]) as u32;
+        let k = (k + lo[a]) as u32 * s;
         add((c, a as u8, 1, d, k), r);
         add((d, a as u8, 0, c, k), r);
     });
@@ -1281,16 +1379,16 @@ fn faces(ctx: &Ctx<'_>, t: usize, cell_of: &Field<u32>, layers: &[Layer; 6]) -> 
         }
         let (a1, a2) = ((a + 1) % 3, (a + 2) % 3);
         let k = if side == 1 { ctx.grid.dims[a] } else { 0 } as u32;
-        layer.each(|s, e, c| {
+        layer.each(|start, end, c| {
             if c == SOLID {
                 return;
             }
-            for r in run_rects(s, e, size as u32) {
+            for r in run_rects(start, end, size as u32) {
                 let r = [
-                    r[0] + lo[a1] as u32,
-                    r[1] + lo[a1] as u32,
-                    r[2] + lo[a2] as u32,
-                    r[3] + lo[a2] as u32,
+                    (r[0] + lo[a1] as u32) * s,
+                    (r[1] + lo[a1] as u32) * s,
+                    (r[2] + lo[a2] as u32) * s,
+                    (r[3] + lo[a2] as u32) * s,
                 ];
                 add((c, a as u8, side as u8, BOUNDARY, k), r);
             }
@@ -1315,10 +1413,11 @@ fn faces(ctx: &Ctx<'_>, t: usize, cell_of: &Field<u32>, layers: &[Layer; 6]) -> 
     out
 }
 
-/// The tile-local voxel range of target `o`'s box, grown by one voxel and clipped to the domain
-/// and to the tile at `lo`; `None` when it does not reach the tile.
-fn target_range(ctx: &Ctx<'_>, o: usize, lo: [usize; 3]) -> Option<[(usize, usize); 3]> {
-    let g = &ctx.grid;
+/// The tile-local voxel range of target `o`'s box in the tile's space `sp`, grown by one of its
+/// voxels and clipped to the domain and to the tile; `None` when it does not reach the tile.
+fn target_range(ctx: &Ctx<'_>, sp: &Space, o: usize) -> Option<[(usize, usize); 3]> {
+    let g = &sp.grid;
+    let lo = sp.lo;
     let domain = &ctx.domain;
     let e = g.voxel;
     let t = &ctx.input.targets[o];
@@ -1328,16 +1427,17 @@ fn target_range(ctx: &Ctx<'_>, o: usize, lo: [usize; 3]) -> Option<[(usize, usiz
         return None;
     }
     let r = [0, 1, 2].map(|a| g.range(a, t.bounds.min[a] - e, t.bounds.max[a] + e));
-    let cl = clip(r, lo, ctx.layout.tile())?;
+    let cl = clip(r, lo, sp.layout.tile())?;
     Some([0, 1, 2].map(|a| (cl[a].0 - lo[a], cl[a].1 - lo[a])))
 }
 
-/// The targets whose box, grown by one voxel, reaches tile `t` inside the domain, as input
-/// indices in input order. These are the only targets the tile's object list depends on.
+/// The targets whose box, grown by one voxel of the tile's space, reaches tile `t` inside the
+/// domain, as input indices in input order. These are the only targets the tile's object list
+/// depends on.
 pub(super) fn overlaps(ctx: &Ctx<'_>, t: usize) -> Vec<u32> {
-    let lo = ctx.lo(t);
+    let sp = ctx.space(t);
     (0..ctx.input.targets.len())
-        .filter(|&o| target_range(ctx, o, lo).is_some())
+        .filter(|&o| target_range(ctx, &sp, o).is_some())
         .map(|o| o as u32)
         .collect()
 }
@@ -1358,9 +1458,9 @@ pub(super) fn remap_objects(out: &mut TileOut, overlap: &[u32]) {
 /// in a sealed pocket is now listed in a cell around the pocket when their boxes overlap.
 fn objects(
     ctx: &Ctx<'_>,
+    sp: &Space,
     cell_of: &Field<u32>,
     boxes: &CellBoxes,
-    lo: [usize; 3],
     overlap: &[u32],
 ) -> Vec<(u32, u32)> {
     let layout = cell_of.layout;
@@ -1376,7 +1476,7 @@ fn objects(
                 out.push((c, o as u32));
             }
         };
-        let Some(q) = target_range(ctx, target as usize, lo) else {
+        let Some(q) = target_range(ctx, sp, target as usize) else {
             continue;
         };
         for bz in q[2].0 >> s..=(q[2].1 - 1) >> s {
@@ -1742,37 +1842,60 @@ fn view_tree(grid: &Grid, view: &Field<u32>, lo: [usize; 3]) -> Vec<Node> {
     nodes
 }
 
-/// Umbra's level shift `k` of a tile whose box `frame` overlaps no view volume
-/// (`TileGrid_makeTileRecord`): with `e`
-/// the smallest extent of the view volume `view` and `r` the smallest occluder,
-/// `k = floor(log2(e / (4 r) - 1)) + 1`, at least 1. Such a tile is built at the feature
-/// `r * 2^k` (12 m for the stock 64 m-thick playable layer at `r` 6), which is why a stock tome has
-/// about 3 cells per 32 m tile under and over the layer against 30 inside it. A tile the volume
-/// cuts through counts as inside (0). 0 without a view volume to speak of.
-pub(super) fn level_shift(view: &Aabb, frame: &Aabb, r: f32) -> u32 {
-    let overlaps = (0..3).all(|a| frame.min[a] < view.max[a] && frame.max[a] > view.min[a]);
-    if overlaps || r <= 0.0 {
+/// The level shift `k` of a tile with box `frame`, from its distance to the nearest of the view
+/// `volumes`, with `so` the smallest occluder (lever L2's `cell_merge`), `sh` the voxel and
+/// `per_tile` the tile's voxels per edge. The tile is baked on voxels `sh · 2^k` with feature
+/// `so · 2^k`; the camera never enters it.
+///
+/// * `pad = max(1.6 so, 2 sh)`: a tile overlapping any volume grown by `pad` has `k = 0`.
+/// * Otherwise `d` is the least Euclidean box-to-box distance from the tile to a volume,
+///   `q = d / (4 so) - 1`, and `k = 1 + floor(log2 q)` when `q >= 1`, else 1.
+/// * `k` is capped so that `2^k` divides `per_tile` (a whole number of coarse voxels per tile).
+///
+/// At `so` 6, `sh` 0.125, 32 m tiles: `d` under 72 m gives 1, under 120 m 2, under 216 m 3, under
+/// 408 m 4, under 792 m 5. 0 when `so` is 0 (lever L2 off) or there is no volume.
+pub(super) fn level_shift(
+    volumes: &[Aabb],
+    frame: &Aabb,
+    so: f32,
+    sh: f32,
+    per_tile: usize,
+) -> u32 {
+    if so <= 0.0 || volumes.is_empty() {
         return 0;
     }
-    let e = (0..3)
-        .map(|a| view.max[a] - view.min[a])
-        .fold(f32::INFINITY, f32::min);
-    if !e.is_finite() {
+    let pad = (1.6 * so).max(2.0 * sh);
+    let near = volumes
+        .iter()
+        .any(|v| (0..3).all(|a| frame.min[a] < v.max[a] + pad && frame.max[a] > v.min[a] - pad));
+    if near {
         return 0;
     }
-    let q = e / (4.0 * r) - 1.0;
-    if q < 1.0 {
-        1
+    let d = volumes
+        .iter()
+        .map(|v| {
+            (0..3)
+                .map(|a| {
+                    let gap = f64::from(v.min[a] - frame.max[a])
+                        .max(f64::from(frame.min[a] - v.max[a]))
+                        .max(0.0);
+                    gap * gap
+                })
+                .sum::<f64>()
+                .sqrt()
+        })
+        .fold(f64::INFINITY, f64::min);
+    let q = d / (4.0 * f64::from(so)) - 1.0;
+    let mut k = if q >= 1.0 {
+        // Exact for the powers of two the table's bounds fall on.
+        1 + q.log2().floor().min(30.0) as u32
     } else {
-        q.log2().floor() as u32 + 1
+        1
+    };
+    while k > 0 && !per_tile.is_multiple_of(1 << k) {
+        k -= 1;
     }
-}
-
-/// Umbra's cell level for a tile of edge `tile` metres at feature `feature`, as a block edge
-/// in voxels: `tile / 2^round(log2(tile / feature))`, at least one voxel.
-pub(super) fn cell_level_block(tile: f32, feature: f32, voxel: f32) -> usize {
-    let level = (tile / feature).log2().round().max(0.0);
-    ((tile / 2f32.powf(level)) / voxel).round().max(1.0) as usize
+    k
 }
 
 /// The world box of a tile over tile-grid range `r`, as the tome stores it (and as the runtime
@@ -1955,43 +2078,61 @@ fn midpoint_view_tree(
     (nodes, leaf_choices)
 }
 
-/// With [`super::Params::view_mask`] (and lever L4): the tile-local voxels `[lo, hi)` per axis
-/// that the view volume reaches, closed and grown by one voxel each way so that a camera on the
-/// volume's boundary, or on a voxel plane, is never outside them. `None` when the mask is off.
-/// An empty range masks the whole tile.
-pub(super) fn view_range(ctx: &Ctx<'_>, t: usize) -> Option<[[usize; 2]; 3]> {
+/// With [`super::Params::view_mask`] (and lever L4): per view volume, in order, the tile-local
+/// voxels `[lo, hi)` per axis (in the tile's [`Space`]) that it reaches, closed and grown by one
+/// voxel each way so that a camera on the volume's boundary, or on a voxel plane, is never outside
+/// them. `None` when the mask is off. A voxel in none of the ranges is masked; an empty range
+/// holds no voxel.
+pub(super) fn view_range(ctx: &Ctx<'_>, t: usize) -> Option<Vec<[[usize; 2]; 3]>> {
     let p = &ctx.input.params;
     if !(p.view_mask && p.midpoint_views) {
         return None;
     }
-    let g = &ctx.grid;
-    let vv = &ctx.input.view_volume;
-    let lo = ctx.lo(t);
-    let size = ctx.layout.tile();
-    Some(std::array::from_fn(|a| {
-        let (l, h) = g.range(a, vv.min[a], vv.max[a]);
-        let clip = |k: usize| k.clamp(lo[a], lo[a] + size) - lo[a];
-        let (l, h) = (clip(l.saturating_sub(1)), clip(h + 1));
-        [l, h.max(l)]
-    }))
+    let sp = ctx.space(t);
+    let g = &sp.grid;
+    let lo = sp.lo;
+    let size = sp.layout.tile();
+    Some(
+        ctx.volumes
+            .iter()
+            .map(|vv| {
+                std::array::from_fn(|a| {
+                    let (l, h) = g.range(a, vv.min[a], vv.max[a]);
+                    let clip = |k: usize| k.clamp(lo[a], lo[a] + size) - lo[a];
+                    let (l, h) = (clip(l.saturating_sub(1)), clip(h + 1));
+                    [l, h.max(l)]
+                })
+            })
+            .collect(),
+    )
 }
 
-/// Makes every voxel outside the tile-local range `rg` "don't care", as Umbra's strict view
-/// volumes (optimizer flag 4, which the stock tomes set) leave cells the camera cannot enter out of the view
-/// tree (`viewTree_fromOctree_r` skips filtered cells). The view tree then
+/// Makes every voxel outside all the tile-local ranges `ranges` "don't care", as Umbra's strict
+/// view volumes (optimizer flag 4, which the stock tomes set) leave cells the camera cannot enter
+/// out of the view tree (`viewTree_fromOctree_r` skips filtered cells). The view tree then
 /// resolves cells only where the camera may be: on Bistro at 32 m the trees fall from 346k to
 /// 65k nodes (Umbra 39k), since the 32 m tiles reach far above the street-level view volume.
-/// Cells keep their portals and objects; a cell wholly outside the volume has no leaf.
-fn mask_view(view: &mut Field<u32>, rg: &[[usize; 2]; 3]) {
+/// Cells keep their portals and objects; a cell wholly outside the volumes has no leaf.
+fn mask_view(view: &mut Field<u32>, ranges: &[[[usize; 2]; 3]]) {
     let layout = view.layout;
     let edge = layout.edge();
-    let inside = |v: [usize; 3]| (0..3).all(|a| rg[a][0] <= v[a] && v[a] < rg[a][1]);
+    let inside = |v: [usize; 3]| {
+        ranges
+            .iter()
+            .any(|rg| (0..3).all(|a| rg[a][0] <= v[a] && v[a] < rg[a][1]))
+    };
     for b in 0..layout.count() {
         let o = layout.coords(b).map(|k| k * edge);
-        if (0..3).all(|a| rg[a][0] <= o[a] && o[a] + edge <= rg[a][1]) {
+        if ranges
+            .iter()
+            .any(|rg| (0..3).all(|a| rg[a][0] <= o[a] && o[a] + edge <= rg[a][1]))
+        {
             continue;
         }
-        if (0..3).any(|a| o[a] + edge <= rg[a][0] || rg[a][1] <= o[a]) {
+        if ranges
+            .iter()
+            .all(|rg| (0..3).any(|a| o[a] + edge <= rg[a][0] || rg[a][1] <= o[a]))
+        {
             view.bricks[b] = Brick::Uniform(SOLID);
             continue;
         }

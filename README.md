@@ -104,7 +104,21 @@ let in_frustum = q.frustum(&rt, &camera)?;
   targets up to `Params::domain_margin` past it (default 0). Occluders past it are ignored (except
   by parity rays), seeds past it are ignored, and a target reaching past it is also listed in
   every cell with a boundary portal on that side. View trees resolve cells only within a voxel of
-  the view volume; a point further out may find any nearby cell or none.
+  the view volume; a point further out may find any nearby cell or none. More view volumes can
+  be given in `Params::extra_view_volumes` (addition, not breaking): the domain covers all of
+  them, the view mask keeps the union of their voxel ranges, and unreachable-cell removal starts
+  each cell from the box around its overlaps with the volumes.
+- **Coarse tiles away from the view volumes** (`Params::coarsen_outside`, on by default; matters
+  only with a domain margin or several view volumes, whose gap tiles coarsen at margin 0): a tile gets a level shift `k` from its least distance `d` to a view
+  volume, with `SO = cell_merge` and `pad = max(1.6 SO, 2 voxel)`: `k = 0` when it overlaps a
+  volume grown by `pad`, else `q = d / (4 SO) - 1` and `k = 1 + floor(log2 q)` for `q >= 1`, 1
+  otherwise, capped so `2^k` divides the tile's voxel count. The tile is baked on `voxel · 2^k`
+  voxels with L2 threshold `SO · 2^k` (at SO 6, 0.125 m voxels and 32 m tiles: under 72 m 0.25 m
+  voxels, under 120 m 0.5 m, under 216 m 1 m, under 408 m 2 m, under 792 m 4 m), and reports
+  its cells, portals and seams at the grid's voxel, so the flood, seams, global stage and cache
+  treat it like any tile. Two coarse sibling leaves may collapse up to `tile · 2^min(k)`, and a
+  coarse tile's `+0x48` level uses its own voxel. Bakes whose tiles all touch the view volumes
+  are unchanged.
 
 ## Rules
 

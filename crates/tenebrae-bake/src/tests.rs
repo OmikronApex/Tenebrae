@@ -1002,6 +1002,7 @@ fn l1_keeps_solid_and_open_empty_tiles_apart() {
             choices: Vec::new(),
             cells,
             explicit: false,
+            shift: 0,
         }));
     }
     let mut scene = global::Scene {
@@ -2949,35 +2950,435 @@ fn coalesce_trades_area_for_rectangles() {
     }
 }
 
-/// `tile::level_shift` and `tile::cell_level_block`: Umbra's build of tiles outside every view
-/// volume, as `Params::domain_margin` documents it.
+/// `tile::level_shift`: the distance rule of `Params::coarsen_outside`, its table at SO 6, SH
+/// 0.125 and 32 m tiles, the pad, several volumes and the cap on the tile's voxel count.
 #[test]
-fn tiles_outside_the_view_volume_get_a_raised_feature() {
-    use super::tile::{cell_level_block, level_shift};
-    use tenebrae_tome::Aabb;
-    let view = Aabb {
-        min: [-128.0, -160.0, -64.0],
-        max: [160.0, 128.0, 0.0],
+fn level_shift_grows_with_the_distance_to_the_nearest_volume() {
+    use super::tile::level_shift;
+    let view = aabb([0.0, 0.0, 0.0], [32.0, 32.0, 32.0]);
+    // A 32 m tile `gap` metres past the volume on x, and `side` metres beside it on y.
+    let tile = |gap: f32, side: f32| {
+        aabb(
+            [32.0 + gap, 32.0 + side, 0.0],
+            [64.0 + gap, 64.0 + side, 32.0],
+        )
     };
-    let tile = |z: f32| Aabb {
-        min: [0.0, 0.0, z],
-        max: [32.0, 32.0, z + 32.0],
-    };
-    assert_eq!(level_shift(&view, &tile(-32.0), 6.0), 0, "inside");
-    assert_eq!(level_shift(&view, &tile(-80.0), 6.0), 0, "cut through");
+    let k = |gap: f32| level_shift(&[view], &tile(gap, -32.0), 6.0, 0.125, 256);
+    assert_eq!(k(-8.0), 0, "inside");
+    assert_eq!(k(0.0), 0, "touching");
+    assert_eq!(k(9.5), 0, "within pad 9.6");
+    for (gap, want) in [
+        (9.7, 1),
+        (71.9, 1),
+        (72.0, 2),
+        (119.9, 2),
+        (120.0, 3),
+        (215.9, 3),
+        (216.0, 4),
+        (407.9, 4),
+        (408.0, 5),
+        (791.9, 5),
+        (792.0, 6),
+    ] {
+        assert_eq!(k(gap), want, "d = {gap}");
+    }
+    // Euclidean: 60 m on x and 60 m on y is 84.9 m.
+    assert_eq!(level_shift(&[view], &tile(60.0, 60.0), 6.0, 0.125, 256), 2);
+    // The nearer of two volumes counts.
+    let near = aabb([140.0, 0.0, 0.0], [150.0, 32.0, 32.0]);
     assert_eq!(
-        level_shift(&view, &tile(0.0), 6.0),
-        1,
-        "touching from outside"
+        level_shift(&[view, near], &tile(300.0, -32.0), 6.0, 0.125, 256),
+        3
     );
-    // 64 / 24 - 1 = 1.67: k = 1; 64 / 12 - 1 = 4.33: floor(log2) + 1 = 3.
-    assert_eq!(level_shift(&view, &tile(-128.0), 6.0), 1);
-    assert_eq!(level_shift(&view, &tile(-128.0), 3.0), 3);
-    assert_eq!(level_shift(&view, &tile(-128.0), 0.0), 0, "L2 off");
-    assert_eq!(cell_level_block(32.0, 12.0, 0.125), 128, "16 m");
-    assert_eq!(cell_level_block(32.0, 6.0, 0.125), 64, "8 m");
-    assert_eq!(cell_level_block(32.0, 3.0, 0.125), 32, "4 m");
-    assert_eq!(cell_level_block(32.0, 24.0, 0.125), 256, "the tile");
+    assert_eq!(
+        level_shift(&[near, view], &tile(300.0, -32.0), 6.0, 0.125, 256),
+        3
+    );
+    // The pad is at least two voxels.
+    assert_eq!(level_shift(&[view], &tile(3.5, -32.0), 1.0, 2.0, 16), 0);
+    assert_eq!(level_shift(&[view], &tile(4.5, -32.0), 1.0, 2.0, 16), 1);
+    // A whole number of coarse voxels per tile: 6 voxels allow k 1 only, 4 allow 2.
+    assert_eq!(level_shift(&[view], &tile(500.0, -32.0), 6.0, 0.125, 6), 1);
+    assert_eq!(level_shift(&[view], &tile(500.0, -32.0), 6.0, 0.125, 4), 2);
+    assert_eq!(level_shift(&[view], &tile(500.0, -32.0), 6.0, 0.125, 5), 0);
+    assert_eq!(
+        level_shift(&[view], &tile(500.0, -32.0), 0.0, 0.125, 256),
+        0,
+        "L2 off"
+    );
+}
+
+/// `grid::Layer::upsample`: a coarse layer upsampled equals the layer built position by position
+/// at the finer resolution.
+#[test]
+fn layers_upsample_to_the_fine_face() {
+    use super::grid::Layer;
+    let row = 5usize;
+    let value = |x: usize, y: usize| ((x * 7 + y * 3) % 4 / 2 + usize::from(x == y)) as u32;
+    let mut coarse = Layer::default();
+    for y in 0..row {
+        for x in 0..row {
+            coarse.push(value(x, y), 1);
+        }
+    }
+    for s in [1usize, 2, 3, 4] {
+        let mut fine = Layer::default();
+        for y in 0..row * s {
+            for x in 0..row * s {
+                fine.push(value(x / s, y / s), 1);
+            }
+        }
+        let up = coarse.clone().upsample(row, s);
+        assert_eq!((up.runs, up.len), (fine.runs, fine.len), "s = {s}");
+    }
+    // A uniform layer stays one run.
+    let mut one = Layer::default();
+    one.push(9, 16);
+    let up = one.upsample(4, 2);
+    assert_eq!((up.runs, up.len), (vec![(0, 9)], 64));
+}
+
+/// The shared scene stretched along +x: a floor, pillars and a sealed room 30 to 120 m past the
+/// view volume, and a target at the far end that `domain_margin` takes in, so most tiles lie
+/// away from the volume. 8 m tiles at 0.5 m voxels (16 voxels: level shifts up to 4).
+fn far_scene() -> (Mesh, Vec<Target<'static>>) {
+    let (mut m, mut targets) = scene();
+    cube(&mut m, [30.0, -20.0, -1.0], [118.0, 20.0, 0.0]);
+    for x in [50.0, 66.0, 81.0, 97.0] {
+        cube(&mut m, [x, -3.0, 0.0], [x + 2.5, 3.5, 12.0]);
+    }
+    let (lo, hi) = ([100.0, 5.0, 0.0], [110.0, 15.0, 6.0]);
+    cube(&mut m, lo, [hi[0], hi[1], lo[2] + 0.5]);
+    cube(&mut m, [lo[0], lo[1], hi[2] - 0.5], hi);
+    cube(&mut m, lo, [lo[0] + 0.5, hi[1], hi[2]]);
+    cube(&mut m, [hi[0] - 0.5, lo[1], lo[2]], hi);
+    cube(&mut m, lo, [hi[0], lo[1] + 0.5, hi[2]]);
+    cube(&mut m, [lo[0], hi[1] - 0.5, lo[2]], hi);
+    targets.push(target([116.0, -1.0, 1.0], [118.0, 1.0, 3.0], 21));
+    targets.push(target([60.0, 8.0, 1.0], [61.0, 9.0, 2.0], 23));
+    (m, targets)
+}
+
+fn far_input<'a>(mesh: &'a Mesh, targets: &'a [Target], p: Params) -> Input<'a> {
+    lever_input(
+        mesh,
+        targets,
+        Params {
+            domain_margin: 100.0,
+            keep_every_target: true,
+            ..p
+        },
+    )
+}
+
+/// Voxels the tile passes bake (each tile at its own resolution) and tiles above level shift 0.
+fn baked_voxels(input: &Input<'_>) -> (usize, usize) {
+    let prep = prepare(input, &mut Progressor::none()).expect("prepare");
+    let ctx = &prep.ctx;
+    let n = ctx.tile_ranges.len();
+    let voxels = (0..n).map(|t| ctx.space(t).layout.tile().pow(3)).sum();
+    (voxels, (0..n).filter(|&t| ctx.level_shift(t) > 0).count())
+}
+
+/// Cells the tile passes build, summed over tiles (before the global stage removes or merges
+/// any).
+fn tile_stage_cells(input: &Input<'_>) -> usize {
+    let prep = prepare(input, &mut Progressor::none()).expect("prepare");
+    let ctx = &prep.ctx;
+    let (floods, live) = flood(&prep);
+    (0..ctx.tile_ranges.len())
+        .map(|t| {
+            let (surface, solid, peak) = tile::solid_pass(ctx, t, &live, &floods);
+            let overlap = tile::overlaps(ctx, t);
+            tile::cell_pass(ctx, t, surface.count(), solid, peak, &overlap)
+                .cells
+                .len()
+        })
+        .sum()
+}
+
+/// `Params::coarsen_outside` on a margin bake: tiles away from the volume are baked coarse (fewer
+/// voxels, fewer cells), both tomes round-trip, every in-volume point resolves in both to a cell
+/// of the same tile, every seed in the volume finds a cell, and the bake does not depend on the
+/// thread count or on a warm cache.
+#[test]
+fn coarse_tiles_outside_the_view_volume() {
+    let (mesh, targets) = far_scene();
+    // 2 m seed blocks, so an 8 m tile holds several cells.
+    let p = |coarsen_outside: bool, threads: usize| Params {
+        coarsen_outside,
+        threads,
+        cells: CellMode::Components { block: 2.0 },
+        ..Params::default()
+    };
+    let (on_in, off_in) = (
+        far_input(&mesh, &targets, p(true, 4)),
+        far_input(&mesh, &targets, p(false, 4)),
+    );
+    let (on_voxels, coarse) = baked_voxels(&on_in);
+    let (off_voxels, none) = baked_voxels(&off_in);
+    assert_eq!(none, 0);
+    assert!(
+        coarse > 0 && on_voxels < off_voxels,
+        "{coarse} {on_voxels} {off_voxels}"
+    );
+    let t0 = std::time::Instant::now();
+    let (on, on_r) = bake(&on_in).expect("bake");
+    let t_on = t0.elapsed();
+    let t0 = std::time::Instant::now();
+    let (off, off_r) = bake(&off_in).expect("bake");
+    let t_off = t0.elapsed();
+    eprintln!(
+        "coarse: {on_voxels} voxels, {} cells, {t_on:?}; fine: {off_voxels} voxels, {} cells, {t_off:?}",
+        on_r.cells, off_r.cells
+    );
+    let (on_cells, off_cells) = (tile_stage_cells(&on_in), tile_stage_cells(&off_in));
+    assert!(on_cells < off_cells, "{on_cells} {off_cells}");
+    assert!(on_r.cells <= off_r.cells, "{} {}", on_r.cells, off_r.cells);
+    assert_eq!(on.header.bounds, off.header.bounds);
+    for tome in [&on, &off] {
+        assert_valid(tome);
+        let bytes = tenebrae_tome::write(tome);
+        assert_eq!(
+            tenebrae_tome::write(&tenebrae_tome::read(&bytes).expect("read")),
+            bytes
+        );
+    }
+    // Each leaf stores its own voxel in its level: 0.5 m · 2^k, `k` the least level shift of
+    // the grid tiles it covers (0 throughout without coarsening).
+    let shifts = |input: &Input<'_>| {
+        let prep = prepare(input, &mut Progressor::none()).expect("prepare");
+        let ctx = &prep.ctx;
+        (0..ctx.tile_ranges.len())
+            .map(|t| {
+                let f = tile::tile_frame(&ctx.grid, 8.0, &ctx.tile_ranges[t]);
+                (f, ctx.level_shift(t))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut coarse_leaves = [0usize; 2];
+    for (i, (tome, input)) in [(&on, &on_in), (&off, &off_in)].into_iter().enumerate() {
+        let grid = shifts(input);
+        for t in tome.tiles.iter().flatten().filter(|t| t.view.is_some()) {
+            let k = grid
+                .iter()
+                .filter(|(f, _)| {
+                    (0..3).all(|a| t.bounds.min[a] <= f.min[a] && f.max[a] <= t.bounds.max[a])
+                })
+                .map(|(_, k)| *k)
+                .min()
+                .expect("covers a grid tile");
+            let want = super::tile_level(0.5 * (1u32 << k) as f32, 8.0, &t.bounds);
+            assert_eq!(t.level.to_bits(), want.to_bits(), "{:?}", t.bounds);
+            coarse_leaves[i] += usize::from(k > 0);
+        }
+    }
+    assert!(
+        coarse_leaves[0] > 0 && coarse_leaves[1] == 0,
+        "{coarse_leaves:?}"
+    );
+    // Every in-volume sample of the fine bake resolves in both tomes, to cells of the same tile.
+    let vv = on_in.view_volume;
+    let tile_of = |tome: &Tome| -> Vec<Aabb> {
+        let mut out = vec![aabb([0.0; 3], [0.0; 3]); tome.global_cells.len()];
+        for t in tome.tiles.iter().flatten().filter(|t| t.view.is_some()) {
+            for c in &t.cells {
+                out[c.0[4] as usize] = t.bounds;
+            }
+        }
+        out
+    };
+    let (on_tiles, off_tiles) = (tile_of(&on), tile_of(&off));
+    let mut checked = 0;
+    for p in off_r.cell_samples.iter().flatten() {
+        if (0..3).any(|a| p[a] <= vv.min[a] || p[a] >= vv.max[a]) {
+            continue;
+        }
+        let (a, b) = (
+            tenebrae_tome::locate::find_cell(&on, *p),
+            tenebrae_tome::locate::find_cell(&off, *p),
+        );
+        let (Some(a), Some(b)) = (a, b) else {
+            panic!("in-volume point {p:?}: {a:?} {b:?}");
+        };
+        assert_eq!(on_tiles[a as usize], off_tiles[b as usize], "{p:?}");
+        checked += 1;
+    }
+    assert!(checked > 0);
+    assert_samples_find_their_cells(&on, &on_r, 0.5, &vv);
+    for s in &SEEDS {
+        assert!(
+            tenebrae_tome::locate::find_cell(&on, *s).is_some(),
+            "seed {s:?}"
+        );
+    }
+    // Thread count and cache.
+    let one = super::bake(&far_input(&mesh, &targets, p(true, 1)), None, None).expect("bake");
+    let four = super::bake(&on_in, None, None).expect("bake");
+    // Everything but `grid_bytes`, which counts the `threads` largest tiles.
+    let key = |b: &Baked| {
+        (
+            tenebrae_tome::write(&b.tome),
+            b.report.cell_samples.clone(),
+            b.report.cell_points.clone(),
+            b.report.voxels,
+            b.object_map.clone(),
+        )
+    };
+    assert!(key(&one) == key(&four), "threads change the coarse bake");
+    let cache = first_cache(&on_in);
+    let (report, _) = rebake(&on_in, &cache.to_bytes());
+    assert_eq!(report.cache_hits, cache.entries());
+}
+
+/// With margin 0 and one view volume every tile touches it, so `coarsen_outside` changes nothing
+/// (with several volumes, tiles in the gap between them would coarsen).
+#[test]
+fn coarsening_leaves_margin_zero_bakes_unchanged() {
+    let (mesh, targets) = scene();
+    let tome = |coarsen_outside: bool| {
+        let p = Params {
+            threads: 4,
+            coarsen_outside,
+            ..Params::default()
+        };
+        let input = lever_input(&mesh, &targets, p);
+        assert_eq!(baked_voxels(&input).1, 0);
+        tenebrae_tome::write(&bake(&input).expect("bake").0)
+    };
+    assert!(tome(true) == tome(false));
+}
+
+/// A seed in a coarse tile seeds the coarse voxel it lies in.
+#[test]
+fn a_seed_in_a_coarse_tile_seeds_its_coarse_voxel() {
+    let (mesh, targets) = far_scene();
+    let seeds = [SEEDS[0], SEEDS[1], SEEDS[2], [105.3, 9.7, 3.2]];
+    let mut input = far_input(&mesh, &targets, Params::default());
+    input.seeds = &seeds;
+    let prep = prepare(&input, &mut Progressor::none()).expect("prepare");
+    let ctx = &prep.ctx;
+    let g = &ctx.grid;
+    let v = [0, 1, 2].map(|a| ((seeds[3][a] - g.origin[a]) / g.voxel).floor() as usize);
+    let t = (0..ctx.tile_ranges.len())
+        .find(|&t| {
+            let lo = ctx.lo(t);
+            (0..3).all(|a| lo[a] <= v[a] && v[a] < lo[a] + ctx.layout.tile())
+        })
+        .expect("tile");
+    let sp = ctx.space(t);
+    assert!(sp.s > 1, "the room's tile is coarse");
+    let size = sp.layout.tile();
+    let l = [0, 1, 2].map(|a| (v[a] - ctx.lo(t)[a]) / sp.s);
+    assert_eq!(
+        tile::starts(ctx, t).0,
+        vec![(l[2] * size + l[1]) * size + l[0]]
+    );
+    // The sealed room's open component is seeded.
+    assert!(!tile::flood_pass(ctx, t).seeded.is_empty());
+    bake(&input).expect("bake");
+}
+
+/// Several view volumes (with a margin, so the domain matches a bake without the second): the
+/// domain covers both, the level shift comes from the nearer, the mask
+/// and reachability keep both; an empty or invalid extra volume is refused.
+#[test]
+fn several_view_volumes() {
+    let (mesh, targets) = far_scene();
+    let second = aabb([96.0, -10.0, 0.0], [112.0, 10.0, 10.0]);
+    let p = Params {
+        threads: 4,
+        extra_view_volumes: vec![second],
+        // L1's open region tiles hold one cell over the region whatever the mask, so they would
+        // resolve the second volume's points in the bake without it too.
+        empty_leaves: false,
+        ..Params::default()
+    };
+    let mut input = far_input(&mesh, &targets, p);
+    let seeds = [SEEDS[0], SEEDS[1], SEEDS[2], [92.0, 0.0, 3.0]];
+    input.seeds = &seeds;
+    let prep = prepare(&input, &mut Progressor::none()).expect("prepare");
+    let ctx = &prep.ctx;
+    assert!(ctx.domain.max[0] >= 112.0 && ctx.domain.min[0] <= -30.0);
+    // A tile between the volumes is coarse; tiles at either volume are not.
+    let at = |x: f32| {
+        (0..ctx.tile_ranges.len())
+            .find(|&t| {
+                let f = tile::tile_frame(&ctx.grid, 8.0, &ctx.tile_ranges[t]);
+                f.min[0] <= x
+                    && x < f.max[0]
+                    && f.min[1] <= 1.0
+                    && 1.0 < f.max[1]
+                    && f.min[2] <= 1.0
+                    && 1.0 < f.max[2]
+            })
+            .expect("tile")
+    };
+    assert_eq!(ctx.level_shift(at(100.0)), 0);
+    assert_eq!(ctx.level_shift(at(0.0)), 0);
+    assert!(ctx.level_shift(at(64.0)) > 0);
+    let (tome, report) = bake(&input).expect("bake");
+    assert_valid(&tome);
+    // The same domain (the margin reaches the far target either way) without the second volume.
+    let mut alone = far_input(
+        &mesh,
+        &targets,
+        Params {
+            empty_leaves: false,
+            ..Params::default()
+        },
+    );
+    alone.seeds = &seeds;
+    let (single, single_report) = bake(&alone).expect("bake");
+    assert_eq!(single.header.bounds, tome.header.bounds);
+    // Open points of the second volume resolve only with it (the mask keeps it); the first
+    // volume's resolve either way.
+    let first = [-10.0, 0.0, 3.0];
+    let second_points = [[104.0, -6.0, 3.0], [100.5, 0.5, 3.0]];
+    assert!(tenebrae_tome::locate::find_cell(&tome, first).is_some());
+    assert!(tenebrae_tome::locate::find_cell(&single, first).is_some());
+    for p in second_points {
+        assert!(
+            tenebrae_tome::locate::find_cell(&tome, p).is_some(),
+            "{p:?}"
+        );
+        assert!(
+            tenebrae_tome::locate::find_cell(&single, p).is_none(),
+            "{p:?}"
+        );
+    }
+    // Reachability keeps cells inside the second volume only with it.
+    let far_cells = |r: &Report| {
+        r.cell_samples
+            .iter()
+            .filter(|s| {
+                s.iter()
+                    .any(|p| (0..3).all(|a| second.min[a] < p[a] && p[a] < second.max[a]))
+            })
+            .count()
+    };
+    assert!(far_cells(&report) > 0);
+    assert_eq!(far_cells(&single_report), 0);
+    assert!(
+        report
+            .cell_points
+            .iter()
+            .any(|p| p.is_some_and(|p| p[0] > 96.0))
+    );
+    for bad in [
+        aabb([0.0, 0.0, 0.0], [0.0, 1.0, 1.0]),
+        aabb([0.0, 0.0, f32::NAN], [1.0, 1.0, 1.0]),
+        aabb([1.0, 0.0, 0.0], [0.0, 1.0, 1.0]),
+    ] {
+        let p = Params {
+            extra_view_volumes: vec![second, bad],
+            ..Params::default()
+        };
+        assert!(matches!(
+            super::bake(&lever_input(&mesh, &targets, p), None, None),
+            Err(Error::Params(_))
+        ));
+    }
 }
 
 /// `Params::domain_margin`: the domain grows to take in a target past the view volume (up to the
@@ -3073,4 +3474,145 @@ fn shared_object_lists_decode_unchanged() {
         tenebrae_tome::write(&tenebrae_tome::read(&bytes).expect("read")),
         bytes
     );
+}
+
+/// `Voxels` of a coarse tile answer for the coarse voxel covering a grid voxel: the closed pillar
+/// at x 50 is solid, open air is not, and grid voxels under one coarse voxel agree.
+#[test]
+fn voxelize_answers_coarse_voxels() {
+    let (mesh, targets) = far_scene();
+    let input = far_input(&mesh, &targets, Params::default());
+    let vox = voxelize(&input).expect("voxelize");
+    let at = |p: Vec3| [0, 1, 2].map(|a| ((p[a] - vox.origin[a]) / vox.voxel).floor() as usize);
+    let prep = prepare(&input, &mut Progressor::none()).expect("prepare");
+    let v = at([51.2, 0.2, 6.2]);
+    let n = vox.tiles;
+    let t = prep.ctx.tile_at[((v[2] / 16) * n[1] + v[1] / 16) * n[0] + v[0] / 16];
+    let s = prep.ctx.space(t).s;
+    assert!(s > 1, "the pillar's tile is coarse");
+    assert!(vox.solid(v), "inside the closed pillar");
+    let open = at([60.2, 10.2, 20.2]);
+    assert!(!vox.solid(open) && !vox.surface(open));
+    let base = v.map(|k| k / s * s);
+    for d in 0..s * s * s {
+        let w = [base[0] + d % s, base[1] + d / s % s, base[2] + d / (s * s)];
+        assert_eq!(
+            (vox.solid(w), vox.surface(w)),
+            (vox.solid(v), vox.surface(v))
+        );
+    }
+}
+
+/// A cached re-bake across `coarsen_outside` (both ways) equals a fresh bake: tiles near the
+/// volume hit, coarse tiles miss.
+#[test]
+fn cache_across_coarsening_matches_a_fresh_bake() {
+    let (mesh, targets) = far_scene();
+    let input = |coarsen_outside: bool| {
+        far_input(
+            &mesh,
+            &targets,
+            Params {
+                threads: 4,
+                coarsen_outside,
+                ..Params::default()
+            },
+        )
+    };
+    for (from, to) in [(false, true), (true, false)] {
+        let cache = first_cache(&input(from));
+        let n = cache.entries();
+        let (report, _) = rebake(&input(to), &cache.to_bytes());
+        let hits = report.cache_hits;
+        assert!(hits[1] > 0 && hits[1] < n[1], "{hits:?} of {n:?}");
+    }
+}
+
+/// An extra view volume elsewhere in an unchanged domain leaves the keys of tiles it does not
+/// reach alone: they still hit, and the re-bake equals a fresh one.
+#[test]
+fn a_far_extra_volume_keeps_hits_elsewhere() {
+    let (mesh, targets) = far_scene();
+    let base = far_input(&mesh, &targets, cache_params());
+    let cache = first_cache(&base);
+    let n = cache.entries();
+    let extra = far_input(
+        &mesh,
+        &targets,
+        Params {
+            extra_view_volumes: vec![aabb([96.0, -10.0, 0.0], [112.0, 10.0, 10.0])],
+            ..cache_params()
+        },
+    );
+    let (report, _) = rebake(&extra, &cache.to_bytes());
+    let hits = report.cache_hits;
+    assert!(hits[1] > n[1] / 2 && hits[1] < n[1], "{hits:?} of {n:?}");
+}
+
+/// Two coarse sibling leaves collapse past `collapse_size` (up to `tile · 2^min(k)`); without
+/// coarsening no leaf grows past it.
+#[test]
+fn coarse_leaves_collapse_past_the_collapse_size() {
+    let (mesh, targets) = far_scene();
+    let largest = |coarsen_outside: bool| {
+        let p = Params {
+            threads: 4,
+            coarsen_outside,
+            collapse_size: 8.0,
+            empty_leaves: false,
+            ..Params::default()
+        };
+        let (tome, _) = bake(&far_input(&mesh, &targets, p)).expect("bake");
+        tome.tiles
+            .iter()
+            .flatten()
+            .filter(|t| t.view.is_some())
+            .map(|t| {
+                (0..3)
+                    .map(|a| t.bounds.max[a] - t.bounds.min[a])
+                    .fold(0.0f32, f32::max)
+            })
+            .fold(0.0f32, f32::max)
+    };
+    assert!(largest(true) > 8.0);
+    assert_eq!(largest(false), 8.0);
+}
+
+/// `tile::layer_reaches_live`, the seam read of `flood_solid`: a coarse face voxel reaches live
+/// space when any one of the `s²` grid positions under it on a neighbour's layer is live, not
+/// only the first, and a blocked `+` face of the neighbour below closes it.
+#[test]
+fn a_coarse_face_voxel_reads_every_fine_position() {
+    use super::grid::Layer;
+    use super::tile::{LABEL, layer_reaches_live};
+    let (fine, s) = (8usize, 2usize);
+    // Label 0 is live, 1 dead; one position carries 0 (with the blocked bit when `blocked`).
+    let layer = |live_at: (usize, usize), blocked: bool| {
+        let mut l = Layer::default();
+        for y in 0..fine {
+            for x in 0..fine {
+                let v = if (x, y) == live_at {
+                    u32::from(blocked) << 31
+                } else {
+                    1
+                };
+                l.push(v, 1);
+            }
+        }
+        l
+    };
+    let live = [true, false];
+    let reaches = |l: &Layer, below: bool| layer_reaches_live(l, &live, [1, 2], s, fine, below);
+    // Face voxel (1, 2) covers positions x 2..4, y 4..6.
+    for at in [(2, 4), (3, 4), (2, 5), (3, 5)] {
+        assert!(reaches(&layer(at, false), false), "{at:?}");
+        assert!(reaches(&layer(at, false), true), "{at:?}");
+        assert!(!reaches(&layer(at, true), true), "{at:?}");
+    }
+    for at in [(1, 4), (4, 4), (2, 3), (2, 6)] {
+        assert!(!reaches(&layer(at, false), false), "{at:?}");
+    }
+    let mut surface = Layer::default();
+    surface.push(LABEL, fine * fine);
+    assert!(!reaches(&surface, false));
 }
