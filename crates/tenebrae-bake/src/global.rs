@@ -144,6 +144,9 @@ pub(super) struct GTile {
     /// stores the level-order prefix of its splits that ends at its last off-midpoint split
     /// ([`trim_splits`]). Every other tile is split-free.
     pub(super) explicit: bool,
+    /// The level shift it was baked at (`Ctx::level_shift`); a tile made of several, the least of
+    /// theirs.
+    pub(super) shift: u32,
 }
 
 /// The global stage's state.
@@ -275,6 +278,7 @@ pub(super) fn assemble(ctx: &Ctx<'_>, top: Vec<Top>, outs: Vec<TileOut>) -> Scen
             tree: out.tree,
             choices: out.choices,
             explicit: false,
+            shift: ctx.level_shift(t),
         }));
     }
     // The part of a target beyond a domain face: any sight line to it leaves the domain through
@@ -771,7 +775,7 @@ pub(super) fn emit(ctx: &Ctx<'_>, scene: Scene, map: &[Option<u32>], report: &mu
         tiles[node] = Some(Tile {
             bounds: frame,
             flags: 1,
-            level: super::tile_level(p.voxel, p.tile, &frame),
+            level: super::tile_level(p.voxel * (1u32 << tile.shift) as f32, p.tile, &frame),
             cell_word_high: 1,
             cells: records,
             portals: tile_portals,
@@ -1098,7 +1102,8 @@ pub(super) fn collapse_leaves(nodes: &mut Vec<Node>) {
 
 /// Unreachable-cell removal, Umbra's global-cluster pass (reachability pass 2).
 ///
-/// * A cell takes part when its box overlaps the view volume, or when it gets a reach box through
+/// * A cell takes part when its box overlaps a view volume (its reach box: the bounding box of
+///   its overlaps with the view volumes, which may hold space in none of them), or when it gets a reach box through
 ///   a link whose plane lies inside a neighbour's reach box (propagated to a fixed point).
 /// * Components run over links whose plane lies inside the source cell's reach box, between cells
 ///   that both take part.
@@ -1114,7 +1119,7 @@ pub(super) fn reachability(
     threshold: f32,
 ) -> (Vec<Option<u32>>, usize) {
     let g = &ctx.grid;
-    let vv = ctx.input.view_volume;
+    let volumes = &ctx.volumes;
     let n = scene.alias.len();
     let mut boxes = vec![
         Aabb {
@@ -1170,11 +1175,19 @@ pub(super) fn reachability(
             if !is_live {
                 return None;
             }
-            let min = [0, 1, 2].map(|a| b.min[a].max(vv.min[a]));
-            let max = [0, 1, 2].map(|a| b.max[a].min(vv.max[a]));
-            (0..3)
-                .all(|a| min[a] <= max[a])
-                .then_some(Aabb { min, max })
+            volumes
+                .iter()
+                .filter_map(|vv| {
+                    let min = [0, 1, 2].map(|a| b.min[a].max(vv.min[a]));
+                    let max = [0, 1, 2].map(|a| b.max[a].min(vv.max[a]));
+                    (0..3)
+                        .all(|a| min[a] <= max[a])
+                        .then_some(Aabb { min, max })
+                })
+                .reduce(|x, y| Aabb {
+                    min: [0, 1, 2].map(|a| x.min[a].min(y.min[a])),
+                    max: [0, 1, 2].map(|a| x.max[a].max(y.max[a])),
+                })
         })
         .collect();
     let mut queue: std::collections::VecDeque<u32> = (0..n as u32)
@@ -1340,7 +1353,14 @@ fn collapse_node(ctx: &Ctx<'_>, scene: &mut Scene, node: usize, size: f32, fill:
         ]
     });
     let extent = (0..3).map(|k| range[k][1] - range[k][0]).max().unwrap_or(0) as f32 * tile;
-    if size > 0.0 && extent > size {
+    // Two coarse tiles (`Params::coarsen_outside`) may grow to their coarser tile size.
+    let level_shift = ta.shift.min(tb.shift);
+    let limit = if level_shift > 0 {
+        size.max(tile * (1u32 << level_shift) as f32)
+    } else {
+        size
+    };
+    if size > 0.0 && extent > limit {
         return;
     }
     if ta.cells.len() + tb.cells.len() >= COLLAPSE_CELLS {
@@ -1458,6 +1478,7 @@ fn collapse_node(ctx: &Ctx<'_>, scene: &mut Scene, node: usize, size: f32, fill:
         tree,
         choices: Vec::new(),
         explicit,
+        shift: level_shift,
     }));
     scene.top[node] = Top::Leaf(scene.tiles.len() - 1);
 }
@@ -1655,8 +1676,10 @@ fn region_tile(
     open: bool,
 ) -> GTile {
     let mut cells: Vec<GCell> = Vec::new();
+    let mut shift = u32::MAX;
     for &t in members {
         let tile = old[t].take().unwrap_or_else(|| unreachable!());
+        shift = shift.min(tile.shift);
         cells.extend(tile.cells);
     }
     if !open {
@@ -1666,6 +1689,7 @@ fn region_tile(
             tree: vec![Node::Leaf(SOLID)],
             choices: Vec::new(),
             explicit: false,
+            shift,
         };
     }
     let mut it = cells.into_iter();
@@ -1701,6 +1725,7 @@ fn region_tile(
         tree: vec![Node::Leaf(0)],
         choices: Vec::new(),
         explicit: false,
+        shift,
     }
 }
 

@@ -13,11 +13,13 @@
 //!
 //! * **Pass A:** the tile coordinate; the tile's bucketed triangles as a sorted set of their
 //!   corners' bit patterns (voxelisation ORs triangles, so their order and duplicates do not
-//!   matter); the tile's snapped seeds; and whether no seeds were given at all.
+//!   matter); the tile's snapped seeds; whether no seeds were given at all; and the tile's level
+//!   shift when it is not 0 (`Ctx::level_shift`: a coarse tile is voxelised at its own voxel).
 //! * **Pass B:** the tile's pass-A key; in flood mode its post-join liveness and, per face, the
 //!   neighbour's pass-A key and liveness (or none); in parity mode a hash of the whole mesh (rays
-//!   cross all of it); with the view mask, the view volume's voxel range in the tile; the tile's
-//!   level shift (`Ctx::level_shift`, 0 unless the tile lies outside the view volume); and the
+//!   cross all of it); with the view mask, the view volume's voxel range in the tile and that
+//!   of each extra view volume reaching it; the tile's
+//!   level shift (`Ctx::level_shift`, 0 unless the tile lies away from every view volume); and the
 //!   boxes of the targets that reach the tile (grown by one voxel), in input order. Object lists are stored as positions in that list and remapped to input indices
 //!   on use, so an edit to a target elsewhere leaves this tile's entry valid.
 //!
@@ -301,6 +303,13 @@ impl Keys {
         h.usize(seeds.len());
         seeds.iter().for_each(|s| h.usize(*s));
         h.bool(none);
+        // A coarse tile's flood depends on its level shift (which the view volumes set); a tile
+        // at 0 hashes as before the shift existed.
+        let k = ctx.level_shift(t);
+        if k > 0 {
+            h.u8(b'k');
+            h.u32(k);
+        }
         h.finish()
     }
 
@@ -342,8 +351,18 @@ impl Keys {
                 }
             }
         }
-        if let Some(rg) = tile::view_range(ctx, t) {
-            rg.iter().flatten().for_each(|k| h.usize(*k));
+        if let Some(ranges) = tile::view_range(ctx, t) {
+            // The first volume hashes as it always did; each further one only when it reaches
+            // the tile (an empty range masks nothing in), with its index, so a volume elsewhere
+            // leaves the key alone.
+            ranges[0].iter().flatten().for_each(|k| h.usize(*k));
+            for (i, rg) in ranges.iter().enumerate().skip(1) {
+                if rg.iter().all(|r| r[0] < r[1]) {
+                    h.u8(b'V');
+                    h.usize(i);
+                    rg.iter().flatten().for_each(|k| h.usize(*k));
+                }
+            }
         }
         h.u32(ctx.level_shift(t));
         h.usize(overlap.len());

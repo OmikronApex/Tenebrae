@@ -1,4 +1,4 @@
-//! `bake SCENE TARGETS OUT.tome minx miny minz maxx maxy maxz [tile voxel [boxes|components[B]|mergedF[bB] [flood|flood-open|parity [SEEDS [threads [reach-threshold [collapse-size [memory-limit-MiB [empty-leaves [cell-merge [global-groups [midpoint-views [cache-file [keep-every-target [lod-tiles [base-distance [domain-margin [group-cost]]]]]]]]]]]]]]]]]]`
+//! `bake SCENE TARGETS OUT.tome minx miny minz maxx maxy maxz [tile voxel [boxes|components[B]|mergedF[bB] [flood|flood-open|parity [SEEDS [threads [reach-threshold [collapse-size [memory-limit-MiB [empty-leaves [cell-merge [global-groups [midpoint-views [cache-file [keep-every-target [lod-tiles [base-distance [domain-margin [group-cost [coarsen-outside]]]]]]]]]]]]]]]]]]]`
 //!
 //! Positionals are append-only; every omitted one is `Params::default()`. B (block) is in metres.
 //! `flood` uses `Params::default()` (surface voxels occlude); `flood-open` turns that off;
@@ -15,7 +15,10 @@
 //! and the LOD distances (`Params::base_distance`). `domain-margin` (metres): how far past the
 //! view volume the domain grows over the targets (`Params::domain_margin`, 0 = none).
 //! `group-cost`: Umbra's object grouping of the targets (`Params::group_cost`, 0 = off); the
-//! map blob then names each target's group.
+//! map blob then names each target's group. `coarsen-outside` (0/1): tiles away from the view
+//! volume are baked on coarser voxels, `voxel · 2^k` with `k` from their distance to it
+//! (`Params::coarsen_outside`, default 1; only matters with a `domain-margin` or several view
+//! volumes).
 //!
 //! `cache-file` turns on the incremental re-bake (`bake` with a cache): when the file exists it is read
 //! as the tile cache of an earlier bake (a malformed cache, or one of another version, is noted on
@@ -225,6 +228,9 @@ fn main() {
     }
     if a.len() >= 29 {
         params.group_cost = f(28);
+    }
+    if a.len() >= 30 {
+        params.coarsen_outside = lever(29);
     }
     eprintln!(
         "scene loaded: {} vertices, {} triangles, {} targets, {} seeds",
