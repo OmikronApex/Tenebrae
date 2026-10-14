@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "tenebrae"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "tenebrae-bake",
  "tenebrae-geom",
@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "tenebrae-bake"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "tenebrae-geom",
  "tenebrae-tome",
@@ -22,29 +22,29 @@ dependencies = [
 
 [[package]]
 name = "tenebrae-bench"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "tenebrae",
 ]
 
 [[package]]
 name = "tenebrae-geom"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "tenebrae-runtime"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "tenebrae-tome",
 ]
 
 [[package]]
 name = "tenebrae-tome"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "tenebrae-tools"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "tenebrae",
  "tenebrae-bench",
